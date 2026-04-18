@@ -1,0 +1,62 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "stateprop"
+version = "0.2.0"
+description = "Numba-accelerated multiparameter Helmholtz equation of state for single-component thermodynamic properties"
+readme = "README.md"
+requires-python = ">=3.9"
+license = {text = "MIT"}
+authors = [
+    {name = "stateprop contributors"}
+]
+keywords = [
+    "thermodynamics",
+    "equation of state",
+    "helmholtz",
+    "span-wagner",
+    "numba",
+    "fluids",
+    "CO2",
+    "nitrogen",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Chemistry",
+    "Topic :: Scientific/Engineering :: Physics",
+]
+dependencies = [
+    "numpy>=1.20",
+]
+
+[project.optional-dependencies]
+fast = ["numba>=0.56"]      # Optional -- enables the JIT acceleration
+dev = [
+    "pytest",
+    "numba>=0.56",
+]
+
+[project.urls]
+Homepage = "https://github.com/your-org/stateprop"
+Issues = "https://github.com/your-org/stateprop/issues"
+
+[tool.setuptools.packages.find]
+include = ["stateprop*"]
+
+[tool.setuptools.package-data]
+stateprop = ["../fluids/*.json"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
