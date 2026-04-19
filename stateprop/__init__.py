@@ -1,10 +1,10 @@
 """
-stateprop: Numba-accelerated evaluation of single-component thermodynamic
-properties via multiparameter Helmholtz equations of state.
+stateprop: Numba-accelerated evaluation of thermodynamic properties via
+multiparameter Helmholtz equations of state.
 
 Public API
 ----------
-Core model:
+Core model (pure components):
     Fluid, load_fluid
     alpha, alpha_r, alpha_0
     alpha_derivs, alpha_r_derivs, alpha_0_derivs
@@ -16,12 +16,27 @@ Property evaluation (rho [mol/m^3], T [K]):
     fugacity_coefficient, joule_thomson_coefficient,
     dp_drho_T, dp_dT_rho
 
-Phase equilibrium / flashing:
-    saturation_pT      -- solve vapor-liquid equilibrium at given T
-    density_from_pressure -- solve rho from (p, T) on a chosen branch
+Phase equilibrium / flashing (pure components):
+    saturation_pT, density_from_pressure
     flash_pt, flash_ph, flash_ps, flash_th, flash_ts, flash_tv, flash_uv
     FlashResult
     trace_phase_envelope, PhaseEnvelope
+
+Mixture support (multicomponent, GERG-style multi-fluid):
+    stateprop.mixture submodule -- see stateprop.mixture docstring.
+    Mixture, Component, load_mixture
+    KunzWagnerReducing, BinaryParams, DepartureFunction
+    flash_pt, flash_tbeta, flash_pbeta, flash_ph, flash_ps, flash_th, flash_ts
+    bubble_point_p, bubble_point_T, dew_point_p, dew_point_T
+    stability_test_TPD, wilson_K, rachford_rice
+
+Cubic EOS (PR, SRK, RK, vdW):
+    stateprop.cubic submodule -- see stateprop.cubic docstring.
+    CubicEOS, PR, SRK, RK, VDW
+    CubicMixture (van der Waals one-fluid mixing with k_ij)
+    flash_pt, flash_ph, flash_ps, flash_th, flash_ts
+    stability_test_TPD
+    bubble_point_p, bubble_point_T, dew_point_p, dew_point_T
 """
 from .fluid import Fluid, load_fluid
 from .core import (
@@ -41,8 +56,10 @@ from .flash import (
     FlashResult,
 )
 from .phase_envelope import trace_phase_envelope, PhaseEnvelope
+from . import mixture
+from . import cubic
 
-__version__ = "0.2.0"
+__version__ = "0.4.1"
 
 __all__ = [
     # Core
@@ -57,10 +74,12 @@ __all__ = [
     "dp_drho_T", "dp_dT_rho",
     # Saturation / density
     "saturation_pT", "density_from_pressure",
-    # Flash
+    # Flash (pure)
     "flash_pt", "flash_ph", "flash_ps", "flash_th", "flash_ts",
     "flash_tv", "flash_uv",
     "FlashResult",
     # Phase envelope
     "trace_phase_envelope", "PhaseEnvelope",
+    # Submodules
+    "mixture", "cubic",
 ]
