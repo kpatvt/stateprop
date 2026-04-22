@@ -28,9 +28,9 @@ import numpy as np
 from ..fluid import Fluid, load_fluid
 
 
-# Directory where component JSON files live
+# Directory where component JSON files live (inside the package as of v0.6.2)
 COMPONENTS_DIR = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
     "fluids", "components",
 )
 

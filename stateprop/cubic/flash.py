@@ -1235,3 +1235,174 @@ def flash_ts(T, s_target, z, mixture, p_init=None, tol=1e-5, maxiter=60):
     raise RuntimeError(
         f"flash_ts did not converge (T={T}, s_target={s_target}); final p={np.exp(ln_p)}"
     )
+
+
+# ---------------------------------------------------------------------------
+# TV and UV flashes -- natural-variable flashes for dynamic simulation
+# ---------------------------------------------------------------------------
+#
+# These mirror the Helmholtz-mixture versions in stateprop/mixture/flash.py.
+# The inner flash_tv iterates on pressure at fixed T to match a target
+# molar volume; the outer flash_uv iterates on T to match internal energy.
+
+def flash_tv(T, v_target, z, mixture, p_init=None, tol=1e-8, maxiter=60):
+    """TV flash for a cubic mixture.
+
+    Given (T, v_target, z), find the pressure such that the bulk mixture
+    molar volume equals v_target. Returns a CubicFlashResult.
+
+    Algorithm: secant in ln(p) with bracket expansion and stagnation
+    detection (to handle the density-resolution limit in dense-liquid
+    regions where flash_pt's internal density solver is near its own
+    numerical floor).
+    """
+    z = np.asarray(z, dtype=np.float64); z = z / z.sum()
+
+    R = 8.314472   # J/(mol K) -- cubic uses a fixed R by convention
+
+    # Initial guess: ideal-gas p for vapor; moderate 1 MPa for liquid
+    v_ref_vapor = R * T / 1e5
+    if p_init is None:
+        if v_target < 0.01 * v_ref_vapor:
+            p_init = 1e6
+        else:
+            p_init = R * T / v_target
+    p = max(float(p_init), 1.0)
+
+    def v_residual(p_val):
+        r = flash_pt(p_val, T, z, mixture, check_stability=False, tol=1e-10)
+        return 1.0 / r.rho - v_target, r
+
+    res1, r1 = v_residual(p)
+    if abs(res1) < tol * abs(v_target):
+        return r1
+    p2 = p * 2.0 if res1 > 0 else p * 0.5
+    res2, r2 = v_residual(p2)
+    if abs(res2) < tol * abs(v_target):
+        return r2
+
+    best_res, best_r = (res1, r1) if abs(res1) <= abs(res2) else (res2, r2)
+
+    # Bracket search
+    expand = 0
+    while res1 * res2 > 0 and expand < 20:
+        if abs(res2) < abs(res1):
+            p, res1, r1 = p2, res2, r2
+            p2 = p2 * 2.0 if res2 > 0 else p2 * 0.5
+        else:
+            p2 = p2 * 2.0 if res2 > 0 else p2 * 0.5
+        res2, r2 = v_residual(p2)
+        if abs(res2) < abs(best_res):
+            best_res, best_r = res2, r2
+        if abs(res2) < tol * abs(v_target):
+            return r2
+        expand += 1
+
+    prev_best_res = abs(best_res)
+    stagnation_count = 0
+    for it in range(maxiter):
+        lnp = np.log(p); lnp2 = np.log(p2)
+        if abs(res2 - res1) < 1e-30:
+            lnp_new = 0.5 * (lnp + lnp2)
+        else:
+            lnp_new = lnp2 - res2 * (lnp2 - lnp) / (res2 - res1)
+        if res1 * res2 < 0:
+            lo, hi = (lnp, lnp2) if lnp < lnp2 else (lnp2, lnp)
+            if not (lo <= lnp_new <= hi):
+                lnp_new = 0.5 * (lo + hi)
+        p_new = float(np.exp(lnp_new))
+        res_new, r_new = v_residual(p_new)
+        if abs(res_new) < abs(best_res):
+            best_res, best_r = res_new, r_new
+        if abs(res_new) < tol * abs(v_target):
+            return r_new
+
+        if abs(best_res) >= prev_best_res * 0.9:
+            stagnation_count += 1
+            if stagnation_count >= 3 and abs(best_res) < 1e-5 * abs(v_target):
+                return best_r
+        else:
+            stagnation_count = 0
+        prev_best_res = abs(best_res)
+
+        if res1 * res2 < 0:
+            if res_new * res1 < 0:
+                p2, res2, r2 = p_new, res_new, r_new
+            else:
+                p, res1, r1 = p_new, res_new, r_new
+        else:
+            p, res1, r1 = p2, res2, r2
+            p2, res2, r2 = p_new, res_new, r_new
+
+    if abs(best_res) < 1e-4 * abs(v_target):
+        return best_r
+    raise RuntimeError(
+        f"cubic flash_tv did not converge (T={T}, v={v_target}, "
+        f"last p={p2:.3e}, last v={1.0/r2.rho:.3e}, "
+        f"best |res|={abs(best_res):.3e})"
+    )
+
+
+def flash_uv(u_target, v_target, z, mixture,
+             T_init=None, tol=1e-6, maxiter=40):
+    """UV flash for a cubic mixture.
+
+    Given (u_target, v_target, z), find (T, p, phase). Outer 1-D Newton on
+    T with (du/dT)_v ~ cv_mix approximated by finite difference through
+    flash_tv.
+
+    The CubicFlashResult stores h and rho (and p); u is recovered via
+    u = h - p/rho at the converged state.
+    """
+    z = np.asarray(z, dtype=np.float64); z = z / z.sum()
+
+    if T_init is None:
+        T_init = float(np.dot(z, mixture.T_c))
+    T = max(float(T_init), 50.0)
+
+    u_scale = max(1.0, abs(u_target))
+    best_diff = np.inf
+    best_result = None
+    last_p = None
+
+    for it in range(maxiter):
+        r = flash_tv(T, v_target, z, mixture, p_init=last_p, tol=1e-10)
+        u_calc = r.h - r.p / r.rho
+        diff = u_calc - u_target
+
+        if abs(diff) < best_diff:
+            best_diff = abs(diff)
+            best_result = r
+
+        if abs(diff) < tol * u_scale:
+            return r
+
+        last_p = r.p
+        dT = max(0.01, 1e-4 * T)
+        try:
+            r2 = flash_tv(T + dT, v_target, z, mixture, p_init=last_p, tol=1e-10)
+            u2 = r2.h - r2.p / r2.rho
+            cv_est = (u2 - u_calc) / dT
+        except RuntimeError:
+            r2 = flash_tv(T - dT, v_target, z, mixture, p_init=last_p, tol=1e-10)
+            u2 = r2.h - r2.p / r2.rho
+            cv_est = (u_calc - u2) / dT
+
+        if cv_est <= 0 or not np.isfinite(cv_est):
+            T = T * (1.05 if diff < 0 else 0.95)
+            continue
+
+        step = -diff / cv_est
+        if abs(step) > 0.2 * T:
+            step = 0.2 * T * np.sign(step)
+        T_new = T + step
+        if T_new <= 0:
+            T_new = 0.5 * T
+        T = T_new
+
+    if best_result is not None and best_diff < tol * u_scale * 100:
+        return best_result
+    raise RuntimeError(
+        f"cubic flash_uv did not converge (u={u_target}, v={v_target}, "
+        f"last T={T}, last |du|={best_diff:.3e})"
+    )

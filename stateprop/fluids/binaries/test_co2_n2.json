@@ -1,0 +1,23 @@
+{
+  "_comment": "Test / demonstration binary set for CO2-N2. The reducing-function parameters (beta_T, gamma_T, beta_v, gamma_v) are close to GERG-2008 values. The departure function is a SIMPLE SYNTHETIC one for testing the framework, NOT GERG-2008 coefficients. For research use, replace with published values.",
+  "pairs": [
+    {
+      "pair": ["carbondioxide", "nitrogen"],
+      "beta_T": 1.022,
+      "gamma_T": 0.933,
+      "beta_v": 1.007,
+      "gamma_v": 1.100,
+      "F": 1.0,
+      "departure": {
+        "polynomial": [
+          {"n":  0.05, "d": 1, "t": 1.0},
+          {"n": -0.03, "d": 2, "t": 1.5}
+        ],
+        "exponential": [
+          {"n": 0.01, "d": 1, "t": 2.0,
+           "eta": 0.25, "epsilon": 0.5, "beta": 0.75, "gamma": 0.5}
+        ]
+      }
+    }
+  ]
+}

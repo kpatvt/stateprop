@@ -122,9 +122,26 @@ def stability_test_TPD(z, T, p, mixture, tol=1e-8, maxiter=50, verbose=False):
     N = mixture.N
 
     # Reference: Gibbs-minimizing density at feed composition.
-    rho_z_vap = density_from_pressure(p, T, z, mixture, phase_hint="vapor")
-    rho_z_liq = density_from_pressure(p, T, z, mixture, phase_hint="liquid")
-    if abs(rho_z_vap - rho_z_liq) / max(rho_z_vap, rho_z_liq) < 1e-4:
+    # Wrap in try/except: at conditions far from any phase boundary the
+    # opposite branch may not exist (e.g. compressed liquid has no real
+    # vapor root) and Newton fails. Accept whichever branch converged.
+    try:
+        rho_z_vap = density_from_pressure(p, T, z, mixture, phase_hint="vapor")
+    except RuntimeError:
+        rho_z_vap = None
+    try:
+        rho_z_liq = density_from_pressure(p, T, z, mixture, phase_hint="liquid")
+    except RuntimeError:
+        rho_z_liq = None
+    if rho_z_vap is None and rho_z_liq is None:
+        raise RuntimeError(
+            f"stability_test_TPD: no density branch converged at p={p}, T={T}"
+        )
+    if rho_z_vap is None:
+        rho_z = rho_z_liq
+    elif rho_z_liq is None:
+        rho_z = rho_z_vap
+    elif abs(rho_z_vap - rho_z_liq) / max(rho_z_vap, rho_z_liq) < 1e-4:
         rho_z = rho_z_vap
     else:
         from .properties import _pure_caloric

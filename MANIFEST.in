@@ -1,0 +1,28 @@
+# MANIFEST.in - controls what goes into the sdist (source distribution)
+# Wheel contents are governed by pyproject.toml's [tool.setuptools.packages.find]
+# and [tool.setuptools.package-data] sections; this file only affects the sdist.
+
+include LICENSE
+include README.md
+include pyproject.toml
+include MANIFEST.in
+include py.typed
+
+# Tests and dev tools belong in the sdist so users installing from source can
+# run the full suite and run the CoolProp -> stateprop converter (tools/).
+recursive-include tests *.py
+recursive-include tools *.py
+recursive-include examples *.py *.md
+
+# Fluid data (also picked up by package-data, but listing here is harmless and
+# makes sdist contents inspectable from this file alone)
+recursive-include stateprop/fluids *.json
+include stateprop/py.typed
+
+# Exclude things that bloat the sdist
+global-exclude __pycache__
+global-exclude *.py[cod]
+global-exclude .DS_Store
+prune build
+prune dist
+prune *.egg-info

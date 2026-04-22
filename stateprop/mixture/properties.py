@@ -30,7 +30,7 @@ def _pure_alpha_r_derivs(delta, tau, component):
     Returns (a_r, a_r_d, a_r_t, a_r_dd, a_r_tt, a_r_dt).
     """
     pack = component.fluid.pack()
-    res_args = pack[3:25]
+    res_args = pack[3:41]
     return alpha_r_derivs(delta, tau, *res_args)
 
 
@@ -51,13 +51,16 @@ def _pure_alpha_0_derivs(rho, T, component):
     pure alpha_0 value itself (for the entropy-of-mixing term).
     """
     pack = component.fluid.pack()
-    ideal_codes = pack[25]
-    ideal_a = pack[26]
-    ideal_b = pack[27]
+    ideal_codes = pack[41]
+    ideal_a = pack[42]
+    ideal_b = pack[43]
+    ideal_c = pack[44]
+    ideal_d = pack[45]
     # Use the pure-component's own critical delta, tau
     delta_pure = rho / component.fluid.rho_c
     tau_pure = component.fluid.T_c / T
-    return alpha_0_derivs(delta_pure, tau_pure, ideal_codes, ideal_a, ideal_b)
+    return alpha_0_derivs(delta_pure, tau_pure,
+                          ideal_codes, ideal_a, ideal_b, ideal_c, ideal_d)
 
 
 def alpha_r_mix_derivs(rho, T, x, mixture):
@@ -197,8 +200,10 @@ def _pure_caloric(rho, T, mixture, x):
         delta_i = rho / fl.rho_c
         tau_i = fl.T_c / T
         pack = fl.pack()
-        ideal_codes, ideal_a, ideal_b = pack[25], pack[26], pack[27]
-        d = alpha_0_derivs(delta_i, tau_i, ideal_codes, ideal_a, ideal_b)
+        ideal_codes, ideal_a, ideal_b = pack[41], pack[42], pack[43]
+        ideal_c, ideal_d = pack[44], pack[45]
+        d = alpha_0_derivs(delta_i, tau_i, ideal_codes, ideal_a, ideal_b,
+                           ideal_c, ideal_d)
         # u^0/(RT) for pure = tau_i * a_0_t;   s^0/R = tau_i * a_0_t - a_0
         u_ideal_RT += x[i] * tau_i * d[2]
         # Mixing entropy: s/R gets a term -ln(x_i) for each component
@@ -413,12 +418,30 @@ def density_from_pressure(p, T, x, mixture, phase_hint="vapor",
     rho_max = 8.0 * rho_pc
     rho_min = 1e-10 * rho_pc
 
+    # Newton with damping. Two convergence tests:
+    #   (a) abs(dp) < tol * max(p, 1.0)  -- standard residual check
+    #   (b) abs(drho/rho) < 1e-13         -- stalled-iteration detector
+    # Test (b) is needed because at low pressures, float64 noise floor in
+    # the EOS pressure evaluation is ~1e-9 * p, which exceeds the default
+    # tol*p threshold and causes Newton to oscillate forever between two
+    # adjacent float values. Test (b) accepts the answer when the step size
+    # falls below relative machine epsilon, i.e. when further iteration
+    # cannot improve the answer.
+    rho_prev = rho
     for it in range(maxiter):
         p_curr = pressure(rho, T, x, mixture)
         dpdr = dp_drho_T(rho, T, x, mixture)
         dp = p - p_curr
         if abs(dp) < tol * max(p, 1.0):
             return rho
+        # Stalled-iteration check: if rho has stopped changing meaningfully
+        # AND the residual is small relative to typical pressures (1 Pa or
+        # better), accept this as converged. Without this, Newton can
+        # oscillate forever between two adjacent float64 values when the
+        # achievable precision in p_curr is below tol*p.
+        if it > 5 and abs(rho - rho_prev) / max(abs(rho), 1.0) < 1e-13 and abs(dp) < 1.0:
+            return rho
+        rho_prev = rho
         if dpdr <= 0:
             # Inside spinodal -- move in the direction of the hint
             if phase_hint == "liquid":

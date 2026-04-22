@@ -8,14 +8,15 @@ from standard identities.
 Packed-argument convention (from Fluid.pack()):
     (R, rho_c, T_c,                                       # 3 scalars
      pn, pd, pt,                                          # 3 polynomial arrays
-     en, ed, et, ec,                                      # 4 exponential arrays
+     en, ed, et, ec, eg,                                  # 5 exponential arrays
+                                                          # (eg = generalized exp(-g*delta^c) multiplier)
      gn, gd, gt, g_eta, g_eps, g_beta, g_gamma,           # 7 gaussian arrays
      n_a, n_aa, n_b, n_B, n_C, n_D, n_A, n_beta,          # 8 non-analytic arrays
      ideal_codes, ideal_a, ideal_b)                       # 3 ideal arrays
-  = 3 scalars + 14 residual arrays + 8 non-analytic arrays + 3 ideal arrays
-  = 28 total.
+  = 3 scalars + 15 residual arrays + 8 non-analytic arrays + 3 ideal arrays
+  = 29 total.
 
-Residual-only kernels take the first 25 (3 scalars + 22 arrays).
+Residual-only kernels take the first 26 (3 scalars + 23 arrays).
 """
 import numpy as np
 
@@ -33,7 +34,7 @@ from .core import alpha_r_derivs, alpha_0_derivs
 
 
 # Number of leading args in pack() for the residual-only kernels
-N_RES_ARGS = 25   # 3 scalars + 22 residual arrays
+N_RES_ARGS = 41   # 3 scalars + 23 residual arrays
 
 
 # ---------------------------------------------------------------------------
@@ -42,46 +43,58 @@ N_RES_ARGS = 25   # 3 scalars + 22 residual arrays
 
 @njit(cache=True)
 def _pressure_kernel(rho, T, R, rho_c, T_c,
-                     pn, pd, pt, en, ed, et, ec,
+                     pn, pd, pt, en, ed, et, ec, eg,
                      gn, gd, gt, ge, geps, gb, ggam,
-                     na, naa, nb, nB, nC, nD, nA, nbeta):
+                     na, naa, nb, nB, nC, nD, nA, nbeta,
+                     dn, dd, dt_, dld, dlt, dgd, dgt,
+                     bn, bd, bt_, be, beps, bbeta, bgamma, bb):
     delta = rho / rho_c
     tau = T_c / T
     _, A_d, _, _, _, _ = alpha_r_derivs(delta, tau,
                                          pn, pd, pt,
-                                         en, ed, et, ec,
+                                         en, ed, et, ec, eg,
                                          gn, gd, gt, ge, geps, gb, ggam,
-                                         na, naa, nb, nB, nC, nD, nA, nbeta)
+                                         na, naa, nb, nB, nC, nD, nA, nbeta,
+                                         dn, dd, dt_, dld, dlt, dgd, dgt,
+                                         bn, bd, bt_, be, beps, bbeta, bgamma, bb)
     return rho * R * T * (1.0 + delta * A_d)
 
 
 @njit(cache=True)
 def _dp_drho_T_kernel(rho, T, R, rho_c, T_c,
-                      pn, pd, pt, en, ed, et, ec,
+                      pn, pd, pt, en, ed, et, ec, eg,
                       gn, gd, gt, ge, geps, gb, ggam,
-                      na, naa, nb, nB, nC, nD, nA, nbeta):
+                      na, naa, nb, nB, nC, nD, nA, nbeta,
+                      dn, dd, dt_, dld, dlt, dgd, dgt,
+                      bn, bd, bt_, be, beps, bbeta, bgamma, bb):
     delta = rho / rho_c
     tau = T_c / T
     _, A_d, _, A_dd, _, _ = alpha_r_derivs(delta, tau,
                                             pn, pd, pt,
-                                            en, ed, et, ec,
+                                            en, ed, et, ec, eg,
                                             gn, gd, gt, ge, geps, gb, ggam,
-                                            na, naa, nb, nB, nC, nD, nA, nbeta)
+                                            na, naa, nb, nB, nC, nD, nA, nbeta,
+                                            dn, dd, dt_, dld, dlt, dgd, dgt,
+                                            bn, bd, bt_, be, beps, bbeta, bgamma, bb)
     return R * T * (1.0 + 2.0 * delta * A_d + delta * delta * A_dd)
 
 
 @njit(cache=True)
 def _dp_dT_rho_kernel(rho, T, R, rho_c, T_c,
-                      pn, pd, pt, en, ed, et, ec,
+                      pn, pd, pt, en, ed, et, ec, eg,
                       gn, gd, gt, ge, geps, gb, ggam,
-                      na, naa, nb, nB, nC, nD, nA, nbeta):
+                      na, naa, nb, nB, nC, nD, nA, nbeta,
+                      dn, dd, dt_, dld, dlt, dgd, dgt,
+                      bn, bd, bt_, be, beps, bbeta, bgamma, bb):
     delta = rho / rho_c
     tau = T_c / T
     _, A_d, _, _, _, A_dt = alpha_r_derivs(delta, tau,
                                             pn, pd, pt,
-                                            en, ed, et, ec,
+                                            en, ed, et, ec, eg,
                                             gn, gd, gt, ge, geps, gb, ggam,
-                                            na, naa, nb, nB, nC, nD, nA, nbeta)
+                                            na, naa, nb, nB, nC, nD, nA, nbeta,
+                                            dn, dd, dt_, dld, dlt, dgd, dgt,
+                                            bn, bd, bt_, be, beps, bbeta, bgamma, bb)
     return rho * R * (1.0 + delta * A_d - delta * tau * A_dt)
 
 
@@ -91,20 +104,24 @@ def _dp_dT_rho_kernel(rho, T, R, rho_c, T_c,
 
 @njit(cache=True)
 def _all_props_kernel(rho, T, R, rho_c, T_c,
-                      pn, pd, pt, en, ed, et, ec,
+                      pn, pd, pt, en, ed, et, ec, eg,
                       gn, gd, gt, ge, geps, gb, ggam,
                       na, naa, nb, nB, nC, nD, nA, nbeta,
-                      codes, a_arr, b_arr):
+                      dn, dd, dt_, dld, dlt, dgd, dgt,
+                      bn, bd, bt_, be, beps, bbeta, bgamma, bb,
+                      codes, a_arr, b_arr, c_arr, d_arr):
     """Compute properties in a single pass.  Returns a 20-element array."""
     delta = rho / rho_c
     tau = T_c / T
 
-    A0, A0_d, A0_t, A0_dd, A0_tt, A0_dt = alpha_0_derivs(delta, tau, codes, a_arr, b_arr)
+    A0, A0_d, A0_t, A0_dd, A0_tt, A0_dt = alpha_0_derivs(delta, tau, codes, a_arr, b_arr, c_arr, d_arr)
     Ar, Ar_d, Ar_t, Ar_dd, Ar_tt, Ar_dt = alpha_r_derivs(delta, tau,
                                                           pn, pd, pt,
-                                                          en, ed, et, ec,
+                                                          en, ed, et, ec, eg,
                                                           gn, gd, gt, ge, geps, gb, ggam,
-                                                          na, naa, nb, nB, nC, nD, nA, nbeta)
+                                                          na, naa, nb, nB, nC, nD, nA, nbeta,
+                                                          dn, dd, dt_, dld, dlt, dgd, dgt,
+                                                          bn, bd, bt_, be, beps, bbeta, bgamma, bb)
 
     one_plus = 1.0 + delta * Ar_d
     dp_drho_group = 1.0 + 2.0 * delta * Ar_d + delta * delta * Ar_dd
@@ -188,13 +205,17 @@ def pressure(rho, T, fluid):
 def compressibility_factor(rho, T, fluid):
     """Compressibility factor Z = p/(rho R T)."""
     def k(rho, T, R, rho_c, T_c,
-          pn, pd, pt, en, ed, et, ec,
+          pn, pd, pt, en, ed, et, ec, eg,
           gn, gd, gt, ge, geps, gb, ggam,
-          na, naa, nb, nB, nC, nD, nA, nbeta):
+          na, naa, nb, nB, nC, nD, nA, nbeta,
+          dn, dd, dt_, dld, dlt, dgd, dgt,
+          bn, bd, bt_, be, beps, bbeta, bgamma, bb):
         p = _pressure_kernel(rho, T, R, rho_c, T_c,
-                             pn, pd, pt, en, ed, et, ec,
+                             pn, pd, pt, en, ed, et, ec, eg,
                              gn, gd, gt, ge, geps, gb, ggam,
-                             na, naa, nb, nB, nC, nD, nA, nbeta)
+                             na, naa, nb, nB, nC, nD, nA, nbeta,
+                             dn, dd, dt_, dld, dlt, dgd, dgt,
+                             bn, bd, bt_, be, beps, bbeta, bgamma, bb)
         return p / (rho * R * T)
     return _scalar_or_vec(k, n_args=N_RES_ARGS)(rho, T, fluid)
 
@@ -211,15 +232,19 @@ def dp_dT_rho(rho, T, fluid):
 
 def _prop_factory(index):
     def kernel(rho, T, R, rho_c, T_c,
-               pn, pd, pt, en, ed, et, ec,
+               pn, pd, pt, en, ed, et, ec, eg,
                gn, gd, gt, ge, geps, gb, ggam,
                na, naa, nb, nB, nC, nD, nA, nbeta,
-               codes, a_arr, b_arr):
+               dn, dd, dt_, dld, dlt, dgd, dgt,
+               bn, bd, bt_, be, beps, bbeta, bgamma, bb,
+               codes, a_arr, b_arr, c_arr, d_arr):
         out = _all_props_kernel(rho, T, R, rho_c, T_c,
-                                pn, pd, pt, en, ed, et, ec,
+                                pn, pd, pt, en, ed, et, ec, eg,
                                 gn, gd, gt, ge, geps, gb, ggam,
                                 na, naa, nb, nB, nC, nD, nA, nbeta,
-                                codes, a_arr, b_arr)
+                                dn, dd, dt_, dld, dlt, dgd, dgt,
+                                bn, bd, bt_, be, beps, bbeta, bgamma, bb,
+                                codes, a_arr, b_arr, c_arr, d_arr)
         return out[index]
     return njit(cache=True)(kernel)
 
@@ -273,16 +298,20 @@ def fugacity_coefficient(rho, T, fluid):
     """Fugacity coefficient phi = f/p."""
     @njit(cache=True)
     def k(rho, T, R, rho_c, T_c,
-          pn, pd, pt, en, ed, et, ec,
+          pn, pd, pt, en, ed, et, ec, eg,
           gn, gd, gt, ge, geps, gb, ggam,
-          na, naa, nb, nB, nC, nD, nA, nbeta):
+          na, naa, nb, nB, nC, nD, nA, nbeta,
+          dn, dd, dt_, dld, dlt, dgd, dgt,
+          bn, bd, bt_, be, beps, bbeta, bgamma, bb):
         delta = rho / rho_c
         tau = T_c / T
         Ar, Ar_d, _, _, _, _ = alpha_r_derivs(delta, tau,
                                                pn, pd, pt,
-                                               en, ed, et, ec,
+                                               en, ed, et, ec, eg,
                                                gn, gd, gt, ge, geps, gb, ggam,
-                                               na, naa, nb, nB, nC, nD, nA, nbeta)
+                                               na, naa, nb, nB, nC, nD, nA, nbeta,
+                                               dn, dd, dt_, dld, dlt, dgd, dgt,
+                                               bn, bd, bt_, be, beps, bbeta, bgamma, bb)
         Z = 1.0 + delta * Ar_d
         return np.exp(Ar + delta * Ar_d - np.log(Z))
     return _scalar_or_vec(k, n_args=N_RES_ARGS)(rho, T, fluid)
@@ -292,15 +321,19 @@ def joule_thomson_coefficient(rho, T, fluid):
     """Joule-Thomson coefficient mu = (dT/dp)_H  [K/Pa]."""
     @njit(cache=True)
     def k(rho, T, R, rho_c, T_c,
-          pn, pd, pt, en, ed, et, ec,
+          pn, pd, pt, en, ed, et, ec, eg,
           gn, gd, gt, ge, geps, gb, ggam,
           na, naa, nb, nB, nC, nD, nA, nbeta,
-          codes, a_arr, b_arr):
+          dn, dd, dt_, dld, dlt, dgd, dgt,
+          bn, bd, bt_, be, beps, bbeta, bgamma, bb,
+          codes, a_arr, b_arr, c_arr, d_arr):
         out = _all_props_kernel(rho, T, R, rho_c, T_c,
-                                pn, pd, pt, en, ed, et, ec,
+                                pn, pd, pt, en, ed, et, ec, eg,
                                 gn, gd, gt, ge, geps, gb, ggam,
                                 na, naa, nb, nB, nC, nD, nA, nbeta,
-                                codes, a_arr, b_arr)
+                                dn, dd, dt_, dld, dlt, dgd, dgt,
+                                bn, bd, bt_, be, beps, bbeta, bgamma, bb,
+                                codes, a_arr, b_arr, c_arr, d_arr)
         cp_val = out[6]
         Ar_d = out[15]
         Ar_dd = out[17]

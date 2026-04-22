@@ -33,7 +33,7 @@ import numpy as np
 from dataclasses import dataclass, field
 from typing import List, Optional, Dict, Tuple
 
-from .eos import CubicEOS, PR, SRK, RK, VDW
+from .eos import CubicEOS, PR, SRK, RK, VDW, _cubic_real_roots
 
 
 class CubicMixture:
@@ -57,15 +57,29 @@ class CubicMixture:
         self.N = len(self.components)
         if self.N < 1:
             raise ValueError("CubicMixture must have at least 1 component")
-        # Verify same EOS family
-        fam = self.components[0].family
+        # Verify EOS-family compatibility.
+        # Components may mix within an equivalence class that shares
+        # (epsilon, sigma, Omega_a, Omega_b). For PR, that means 'pr' and
+        # 'pr78' may be freely mixed (they differ only in the m(omega)
+        # polynomial, applied per-component before mixing). SRK cannot mix
+        # with PR because their (eps, sigma) differ.
+        _pr_like = {"pr", "pr78"}
+
+        def _family_class(fam_name):
+            fn = fam_name.lower()
+            return "pr" if fn in _pr_like else fn
+
+        fam0 = _family_class(self.components[0].family)
         for c in self.components[1:]:
-            if c.family != fam:
+            if _family_class(c.family) != fam0:
                 raise ValueError(
-                    f"All components must share the same EOS family; got "
-                    f"{fam!r} and {c.family!r}."
+                    f"All components must share the same EOS family class; "
+                    f"got {self.components[0].family!r} and {c.family!r}."
                 )
-        self.family = fam
+        # For the mixture's bookkeeping, use the family string of the first
+        # component (user-visible). The actual (epsilon, sigma) come from the
+        # effective family (same for pr and pr78).
+        self.family = self.components[0].family
         self.epsilon = self.components[0].epsilon
         self.sigma   = self.components[0].sigma
         self.R = self.components[0].R
@@ -88,11 +102,27 @@ class CubicMixture:
         self.p_c = np.array([c.p_c for c in self.components])
         self.names = [c.name for c in self.components]
         self.molar_masses = np.array([c.molar_mass for c in self.components])
+        # Per-component volume shift parameters (for Peneloux-style translation).
+        # Zero for untranslated components.
+        self.c_shifts = np.array([getattr(c, "c", 0.0) for c in self.components])
+        # Cache b_i values (constant, not T-dependent) for fast mixing
+        self.b_vec = np.array([c.b for c in self.components])
+        # Cache (1 - k_ij) matrix so hot paths avoid the subtraction each call
+        self.one_minus_kij = 1.0 - self.k_ij
+        # Volume-shift fast-path flag: skip all translation arithmetic when
+        # no component has a nonzero shift (the common case).
+        self._has_volume_shift = bool(np.any(self.c_shifts != 0.0))
 
         # Composition
         if composition is None:
             composition = np.full(self.N, 1.0 / self.N)
         self.set_composition(composition)
+
+    def c_mix(self, x=None):
+        """Linear mole-average mixture volume shift c_m = sum_i x_i c_i [m^3/mol]."""
+        if x is None:
+            x = self.x
+        return float(np.dot(x, self.c_shifts))
 
     def set_composition(self, x):
         x = np.asarray(x, dtype=np.float64)
@@ -111,17 +141,23 @@ class CubicMixture:
     # Mixture parameters a_mix(T, x), b_mix(x)
     # ------------------------------------------------------------------
     def a_b_mix(self, T, x=None):
-        """Return (a_mix, b_mix, a_i_sqrt, da_mix_dT) plus a helper vector
-        SI_i = 2 * sum_j x_j sqrt(a_i a_j)(1-k_ij), used for ln_phi.
+        """Return (a_mix, b_mix, sqrt_a, SI, a_vec, da_mix_dT).
 
-        a_i_sqrt[i] = sqrt(a_i(T))
-        a_mix = sum_i sum_j x_i x_j (1-k_ij) a_i_sqrt[i] a_i_sqrt[j]
-              = a_i_sqrt.T @ ((1-K) * (a_i_sqrt outer a_i_sqrt)) @ x -- but simpler as loop
+        Performance-critical: called in every flash / density / ln_phi
+        evaluation. Uses fully vectorized numpy operations for the N x N
+        double sum rather than Python loops.
+
+        a_mix = sum_i sum_j x_i x_j (1 - k_ij) sqrt(a_i a_j)
+              = x.T @ [sqrt_a outer sqrt_a * (1-k_ij)] @ x
+        SI_i  = 2 * sum_j x_j (1 - k_ij) sqrt(a_i a_j)   (used by ln_phi)
         """
         if x is None:
             x = self.x
-        N = self.N
 
+        # Per-component a(T) and da/dT. These scalar calls are the only
+        # non-vectorized cost left (each component dispatches on its own
+        # alpha function kind). For typical N < 10 the overhead is small.
+        N = self.N
         a_vec = np.empty(N)
         da_dT = np.empty(N)
         for i, c in enumerate(self.components):
@@ -130,21 +166,20 @@ class CubicMixture:
             da_dT[i] = da_i
         sqrt_a = np.sqrt(a_vec)
 
-        # a_mix = sum_ij x_i x_j (1-k_ij) sqrt(a_i a_j)
-        # SI_i  = 2 * sum_j x_j (1-k_ij) sqrt(a_i a_j)   (used by ln_phi)
-        a_mix = 0.0
-        SI = np.zeros(N)
-        for i in range(N):
-            s = 0.0
-            for j in range(N):
-                term = x[j] * (1.0 - self.k_ij[i, j]) * sqrt_a[i] * sqrt_a[j]
-                s += term
-                a_mix += x[i] * term
-            SI[i] = 2.0 * s
+        # Build the symmetric matrix A_ij = sqrt(a_i) sqrt(a_j) (1-k_ij)
+        # then a_mix = x.T A x, SI = 2 * A @ x (using sqrt_a factored out).
+        #
+        # Vectorized: A_ij = (sqrt_a outer sqrt_a) * one_minus_kij
+        # This is O(N^2) in numpy C loops, not Python loops.
+        A_ij = np.outer(sqrt_a, sqrt_a) * self.one_minus_kij
 
-        b_mix = 0.0
-        for i, c in enumerate(self.components):
-            b_mix += x[i] * c.b
+        # a_mix = x . (A_ij . x) = quadratic form in x
+        Ax = A_ij.dot(x)
+        a_mix = float(x.dot(Ax))
+        SI = 2.0 * Ax       # SI_i = 2 * sum_j x_j A_ij
+
+        # b_mix = sum_i x_i b_i
+        b_mix = float(x.dot(self.b_vec))
 
         return a_mix, b_mix, sqrt_a, SI, a_vec, da_dT
 
@@ -229,8 +264,8 @@ class CubicMixture:
         c2 = -(1.0 + B - u * B)
         c1 = A + (w2 - u) * B * B - u * B
         c0 = -(w2 * B ** 3 + w2 * B ** 2 + A * B)
-        roots = np.roots([1.0, c2, c1, c0])
-        real = [r.real for r in roots if abs(r.imag) < 1e-10 and r.real > B + 1e-14]
+        roots = _cubic_real_roots(c2, c1, c0)
+        real = [r for r in roots if r > B + 1e-14]
         return sorted(real), A, B
 
     def density_from_pressure(self, p, T, x=None, phase_hint="vapor"):
@@ -240,6 +275,10 @@ class CubicMixture:
           - smallest Z  <=>  smallest v  <=>  largest rho  = liquid
           - largest Z   <=>  largest v   <=>  smallest rho = vapor
           - middle Z (only when 3 roots): thermodynamically unstable, discarded.
+
+        When volume translation is active (any component has c != 0), the
+        cubic's Z solves for v_cubic = Z*R*T/p; the real molar volume is
+        v_real = v_cubic - c_mix(x), and rho = 1/v_real.
 
         Returns rho (mol/m^3).
         """
@@ -251,12 +290,20 @@ class CubicMixture:
         if len(Zs) == 1:
             Z = Zs[0]
         else:
-            # If exactly 2 (degenerate), keep both. If 3, drop the middle (unstable).
             if len(Zs) == 3:
                 Zs = [Zs[0], Zs[-1]]
             Z = Zs[-1] if phase_hint == "vapor" else Zs[0]
-        rho = p / (Z * self.R * T)
-        return rho
+        if not self._has_volume_shift:
+            return p / (Z * self.R * T)
+        v_cubic = Z * self.R * T / p
+        c_m = self.c_mix(x)
+        v_real = v_cubic - c_m
+        if v_real <= 0:
+            raise RuntimeError(
+                f"volume-translated v_real={v_real} <= 0 at T={T}, p={p}, "
+                f"x={x}; c_mix={c_m} may be too large for this state."
+            )
+        return 1.0 / v_real
 
     # ------------------------------------------------------------------
     # Caloric properties: h, s, u
@@ -289,63 +336,62 @@ class CubicMixture:
         if x is None:
             x = self.x
         N = self.N
-        a_mix, b_mix, _, _, _, da_dT_vec = self.a_b_mix(T, x)
+        a_mix, b_mix, sqrt_a, _, a_vec, da_dT_vec = self.a_b_mix(T, x)
 
-        # Mixture da_mix/dT: derivative of  a_mix = sum_ij x_i x_j (1-k_ij) sqrt(a_i a_j)
-        # Since a_i depends on T but not on x, and sqrt(a_i a_j) = sqrt(a_i)*sqrt(a_j),
-        #   da_mix/dT = sum_ij x_i x_j (1-k_ij) * d/dT[sqrt(a_i a_j)]
-        # with d/dT[sqrt(a_i a_j)] = 0.5 * (da_i/dT * sqrt(a_j)/sqrt(a_i) + da_j/dT * sqrt(a_i)/sqrt(a_j))
-        # Simpler: let u_i = sqrt(a_i), then sqrt(a_i a_j) = u_i u_j, du_i/dT = 0.5 da_i/dT / u_i
-        # So d/dT(u_i u_j) = u_i du_j/dT + u_j du_i/dT
-        #                  = 0.5*(u_i * da_j/dT / u_j + u_j * da_i/dT / u_i)
-        # Then da_mix/dT = sum_ij x_i x_j (1-k_ij) * 0.5*(u_i * da_j/dT/u_j + u_j * da_i/dT/u_i)
-        a_vec = np.array([c.a_T(T)[0] for c in self.components])
-        sqrt_a = np.sqrt(a_vec)
-        da_mix_dT = 0.0
-        for i in range(N):
-            for j in range(N):
-                contrib = 0.5 * (sqrt_a[i] * da_dT_vec[j] / sqrt_a[j]
-                                 + sqrt_a[j] * da_dT_vec[i] / sqrt_a[i])
-                da_mix_dT += x[i] * x[j] * (1.0 - self.k_ij[i, j]) * contrib
+        # Mixture da_mix/dT: derivative of a_mix = sum_ij x_i x_j (1-k_ij) sqrt(a_i a_j).
+        # With u_i = sqrt(a_i), du_i/dT = 0.5 da_i/dT / u_i, and
+        #   d/dT(u_i u_j) = 0.5*(u_i * da_j/dT / u_j + u_j * da_i/dT / u_i).
+        # Fully vectorized using outer products -- O(N^2) in numpy C, no Python loops:
+        #   r_i = da_i/dT / u_i   (length N)
+        #   M_ij = 0.5 * (u_i * r_j + u_j * r_i) * (1 - k_ij)
+        #   da_mix/dT = x.T M x
+        r = da_dT_vec / sqrt_a
+        M = 0.5 * (np.outer(sqrt_a, r) + np.outer(r, sqrt_a)) * self.one_minus_kij
+        da_mix_dT = float(x @ M @ x)
 
-        B = b_mix * rho
+        # Volume translation fast path
+        if self._has_volume_shift:
+            c_mix_val = self.c_mix(x)
+            v_real = 1.0 / rho
+            v_cubic = v_real + c_mix_val
+            rho_cubic = 1.0 / v_cubic
+        else:
+            rho_cubic = rho
+            v_cubic = 1.0 / rho
+            v_real = v_cubic   # same when c=0
+
+        B = b_mix * rho_cubic
         eps_ = self.epsilon
         sig = self.sigma
         R = self.R
 
-        # Pressure from the cubic
-        v = 1.0 / rho
+        # Pressure from the cubic at v_cubic
         if p is None:
             if abs(sig - eps_) > 1e-14:
-                p = R * T / (v - b_mix) - a_mix / ((v + eps_ * b_mix) * (v + sig * b_mix))
+                p = R * T / (v_cubic - b_mix) - a_mix / (
+                    (v_cubic + eps_ * b_mix) * (v_cubic + sig * b_mix)
+                )
             else:
-                p = R * T / (v - b_mix) - a_mix / (v * v)
-        Z = p * v / (R * T)
+                p = R * T / (v_cubic - b_mix) - a_mix / (v_cubic * v_cubic)
+        # User-visible compressibility: Z = p * v_real / (RT)
+        Z = p * v_real / (R * T)
 
         # Residual properties from alpha_r = -ln(1-B) - (a_m/(RT b_m(sig-eps))) * L
-        # T alpha_r_T|_rho = -L * (T a'_m - a_m) / (RT b_m (sig-eps))
         if abs(sig - eps_) > 1e-14:
             L = np.log((1.0 + sig * B) / (1.0 + eps_ * B))
             alpha_r = -np.log(1.0 - B) - (a_mix / (R * T * b_mix * (sig - eps_))) * L
-            # u_res / (RT) = -T * alpha_r_T|_rho = L * (T da_mix/dT - a_mix) / (RT b_mix (sig-eps))
             u_res_RT = L * (T * da_mix_dT - a_mix) / (R * T * b_mix * (sig - eps_))
         else:
-            # vdW: alpha_r = -ln(1-B) - a_m rho / (RT)
-            alpha_r = -np.log(1.0 - B) - a_mix * rho / (R * T)
-            # alpha_r_T|_rho = -[d/dT (a_m/T)] * rho = -(da_mix/dT / T - a_mix/T^2) * rho
-            # T alpha_r_T = -(da_mix/dT - a_mix/T) * rho = (a_mix/T - da_mix/dT) * rho
-            # u_res/RT = -T alpha_r_T = (da_mix/dT - a_mix/T) * rho ... wait let me redo
-            # u^res/(RT) = -T * (d alpha_r/dT)|_rho
-            # alpha_r = -ln(1-B) - a_m rho / (RT) with B = b_m rho independent of T
-            # d alpha_r/dT = -d/dT[a_m rho/(RT)] = -(da_mix/dT * (1/T) - a_m / T^2) * rho
-            #              = -(da_mix/dT / T - a_m / T^2) * rho
-            # -T d alpha_r/dT = T * (da_mix/dT / T - a_m / T^2) * rho
-            #                = (da_mix/dT - a_m/T) * rho
-            u_res_RT = (da_mix_dT - a_mix / T) * rho / R   # dividing by R b/c of units
+            # vdW: alpha_r = -ln(1-B) - a_m rho_cubic / (RT)
+            alpha_r = -np.log(1.0 - B) - a_mix * rho_cubic / (R * T)
+            u_res_RT = (da_mix_dT - a_mix / T) * rho_cubic / R
 
         u_res = R * T * u_res_RT
+        # h_res at the real (translated) state: h_res = u_res + RT*(Z_real - 1)
+        # where Z_real = p*v_real/(RT) -- using the user's real volume.
         h_res = u_res + R * T * (Z - 1.0)
-        # s_res/R = u_res/(RT) - alpha_r
+        # s_res/R = u_res/(RT) - alpha_r  (unchanged by translation at fixed (T, rho_real),
+        # since both sides use rho_cubic consistently)
         s_res = R * (u_res_RT - alpha_r)
 
         # Ideal-gas contributions.
@@ -409,50 +455,56 @@ class CubicMixture:
         """
         if x is None:
             x = self.x
-        N = self.N
         a_mix, b_mix, sqrt_a, SI, a_vec, _ = self.a_b_mix(T, x)
-        B = b_mix * rho                  # reduced density in cubic-EOS terms
+
+        # Volume translation: when active, rho_cubic = 1/(1/rho + c_mix);
+        # otherwise rho_cubic = rho (fast path).
+        if self._has_volume_shift:
+            c_mix_val = self.c_mix(x)
+            v_real = 1.0 / rho
+            v_cubic = v_real + c_mix_val
+            rho_cubic = 1.0 / v_cubic
+        else:
+            rho_cubic = rho
+            v_cubic = 1.0 / rho
+
+        B = b_mix * rho_cubic
         eps_ = self.epsilon
         sig = self.sigma
         R = self.R
+        RT = R * T
 
-        # Reconstruct p and Z from (rho, T, x) through the cubic
-        v = 1.0 / rho
+        # Reconstruct p from the cubic at v_cubic
         if abs(sig - eps_) > 1e-14:
-            p = R * T / (v - b_mix) - a_mix / ((v + eps_ * b_mix) * (v + sig * b_mix))
+            p = RT / (v_cubic - b_mix) - a_mix / (
+                (v_cubic + eps_ * b_mix) * (v_cubic + sig * b_mix)
+            )
         else:
-            p = R * T / (v - b_mix) - a_mix / (v * v)
-        Z = p * v / (R * T)
+            p = RT / (v_cubic - b_mix) - a_mix / (v_cubic * v_cubic)
+        Z_cubic = p * v_cubic / RT
 
-        lnphi = np.zeros(N)
+        one_minus_B = 1.0 - B
+        log_one_minus_B = np.log(one_minus_B)
+        log_Z = np.log(Z_cubic)
+        b_vec = self.b_vec
 
         if abs(sig - eps_) > 1e-14:
             L = np.log((1.0 + sig * B) / (1.0 + eps_ * B))
             bracket_dL = sig / (1.0 + sig * B) - eps_ / (1.0 + eps_ * B)
-            for i in range(N):
-                b_i = self.components[i].b
-                term1 = -np.log(1.0 - B) + rho * b_i / (1.0 - B)
-                term2a = -L / (R * T * (sig - eps_)) * (
-                    SI[i] / b_mix - a_mix * b_i / (b_mix * b_mix)
-                )
-                term2b = -a_mix * rho * b_i / (R * T * b_mix * (sig - eps_)) * bracket_dL
-                lnphi[i] = term1 + term2a + term2b - np.log(Z)
+            term1 = -log_one_minus_B + (rho_cubic / one_minus_B) * b_vec
+            term2a = -L / (RT * (sig - eps_)) * (
+                SI / b_mix - a_mix * b_vec / (b_mix * b_mix)
+            )
+            term2b = (-a_mix * rho_cubic / (RT * b_mix * (sig - eps_))) * bracket_dL * b_vec
+            lnphi = term1 + term2a + term2b - log_Z
         else:
-            # Degenerate vdW case: alpha_r = -ln(1 - B) - a_m rho/(RT)
-            # d(n alpha_r)/dn_i = -ln(1-B) + rho b_i / (1-B) - 2 S_i / n / (RT) * rho ... wait
-            # Let's redo: n alpha_r = -n ln(1 - B_n/V) - [D_n / (RT)] * (1/V)     [since a_m rho = D_n/n / n * (n/V) = D_n/(nV)... ugh]
-            # Actually a_m rho = (D_n/n^2)(n/V) = D_n/(nV), so n * a_m * rho / (RT) = D_n/(V RT) = D_n rho/(n RT). Wait this is off.
-            # Let me redo carefully: a_m = D_n/n^2, rho = n/V, so a_m * rho = D_n/(n^2) * (n/V) = D_n/(nV).
-            # Then n * alpha_r_vdW_attr = n * (-a_m rho/RT) = -n D_n/(nV RT) = -D_n/(V RT).
-            # d/dn_i [-D_n / (V RT)] = -(2 S_i)/(V RT)
-            # And d/dn_i[-n ln(1 - B_n/V)] = -ln(1-B) + rho b_i/(1-B) (same as before)
-            # So ln phi_i = -ln(1-B) + rho b_i/(1-B) - 2 S_i/(V RT) - ln Z
-            #             = -ln(1-B) + rho b_i/(1-B) - SI_i * rho / (RT) - ln Z   (SI_i = 2 S_i/n)
-            for i in range(N):
-                b_i = self.components[i].b
-                term1 = -np.log(1.0 - B) + rho * b_i / (1.0 - B)
-                term2 = -SI[i] * rho / (R * T)
-                lnphi[i] = term1 + term2 - np.log(Z)
+            term1 = -log_one_minus_B + (rho_cubic / one_minus_B) * b_vec
+            term2 = -SI * rho_cubic / RT
+            lnphi = term1 + term2 - log_Z
+
+        # Peneloux correction (only when active)
+        if self._has_volume_shift:
+            lnphi = lnphi + self.c_shifts * (p / RT)
 
         return lnphi
 

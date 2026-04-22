@@ -21,9 +21,9 @@ from .reducing import KunzWagnerReducing, BinaryParams, make_reducing_from_compo
 from .departure import DepartureFunction
 
 
-# Directory where mixture (binary) JSON files live
+# Directory where mixture (binary) JSON files live (inside package as of v0.6.2)
 BINARIES_DIR = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
     "fluids", "binaries",
 )
 

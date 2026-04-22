@@ -31,7 +31,10 @@ Helmholtz stack. Cubic fluids are defined directly by critical parameters,
 not by JSON EOS tables. This keeps cubics simple and general: any fluid can
 be used as long as Tc, Pc, and omega are known.
 """
-from .eos import CubicEOS, PR, SRK, RK, VDW
+from .eos import (
+    CubicEOS, PR, PR78, SRK, RK, VDW,
+    PR_MC, SRK_MC, PR_Twu, SRK_Twu, PRSV,
+)
 from .mixture import CubicMixture, ln_phi, density_from_pressure
 from .flash import (
     CubicFlashResult,
@@ -41,9 +44,20 @@ from .flash import (
     bubble_point_p, bubble_point_T,
     dew_point_p, dew_point_T,
 )
+from .critical import critical_point
+from .envelope import envelope_point, trace_envelope
+from .from_chemicals import (
+    lookup_pure_component,
+    cubic_from_name,
+    PR_from_name, PR78_from_name, SRK_from_name, RK_from_name, VDW_from_name,
+    cubic_mixture_from_names,
+    chemicals_available,
+)
 
 __all__ = [
-    "CubicEOS", "PR", "SRK", "RK", "VDW",
+    "CubicEOS",
+    "PR", "PR78", "SRK", "RK", "VDW",
+    "PR_MC", "SRK_MC", "PR_Twu", "SRK_Twu", "PRSV",
     "CubicMixture",
     "ln_phi", "density_from_pressure",
     "CubicFlashResult",
@@ -52,4 +66,12 @@ __all__ = [
     "stability_test_TPD",
     "bubble_point_p", "bubble_point_T",
     "dew_point_p", "dew_point_T",
+    "critical_point",
+    "envelope_point",
+    "trace_envelope",
+    # chemicals-library interface (v0.8.0)
+    "lookup_pure_component", "cubic_from_name",
+    "PR_from_name", "PR78_from_name", "SRK_from_name",
+    "RK_from_name", "VDW_from_name",
+    "cubic_mixture_from_names", "chemicals_available",
 ]

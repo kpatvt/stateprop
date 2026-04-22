@@ -550,7 +550,7 @@ def _dh_drho_T(rho, T, fluid):
     delta = rho / rho_c
     tau = T_c / T
     pack = fluid.pack()
-    res_args = pack[3:25]
+    res_args = pack[3:41]
     _, Ar_d, _, Ar_dd, _, Ar_dt = alpha_r_derivs(delta, tau, *res_args)
     dh_ddelta = R * T * tau * Ar_dt + R * T * (Ar_d + delta * Ar_dd)
     return dh_ddelta / rho_c

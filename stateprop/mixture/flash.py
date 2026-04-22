@@ -196,18 +196,34 @@ def flash_pt(p, T, z, mixture, K_init=None, check_stability=True,
     if K_init is None and check_stability:
         stable, K_stab, min_tpd = stability_test_TPD(z, T, p, mixture)
         if stable:
-            # Single phase -- decide which (vapor or liquid) by density
-            rho_v = density_from_pressure(p, T, z, mixture, phase_hint="vapor")
-            rho_l = density_from_pressure(p, T, z, mixture, phase_hint="liquid")
-            if abs(rho_v - rho_l) / max(rho_v, rho_l) < 1e-4:
-                # Single density solution -- supercritical
+            # Single phase -- decide which (vapor or liquid) by density.
+            # Wrap density solves in try/except: at conditions far from any
+            # phase boundary (e.g. compressed liquid), the opposite branch
+            # may not exist physically and Newton will fail to converge.
+            try:
+                rho_v = density_from_pressure(p, T, z, mixture, phase_hint="vapor")
+            except RuntimeError:
+                rho_v = None
+            try:
+                rho_l = density_from_pressure(p, T, z, mixture, phase_hint="liquid")
+            except RuntimeError:
+                rho_l = None
+            if rho_v is None and rho_l is None:
+                raise RuntimeError(
+                    f"flash_pt (stable branch): no density branch converged "
+                    f"at p={p}, T={T}"
+                )
+            if rho_v is None:
+                rho = rho_l; phase_label = "liquid"
+            elif rho_l is None:
+                rho = rho_v; phase_label = "vapor"
+            elif abs(rho_v - rho_l) / max(rho_v, rho_l) < 1e-4:
                 if T > np.dot(z, mixture.T_c):
                     phase_label = "supercritical"
                 else:
                     phase_label = "vapor" if rho_v < 0.5 * mixture.reduce(z)[1] else "liquid"
                 rho = rho_v
             else:
-                # Two distinct roots -- pick lower Gibbs energy
                 gv = _pure_caloric(rho_v, T, mixture, z)
                 gl = _pure_caloric(rho_l, T, mixture, z)
                 if gv["h"] - T * gv["s"] < gl["h"] - T * gl["s"]:
@@ -234,9 +250,54 @@ def flash_pt(p, T, z, mixture, K_init=None, check_stability=True,
     compositions, K, beta, niter = result
 
     if compositions is None or beta <= 0 or beta >= 1:
-        # Degenerate to single phase
-        return flash_pt(p, T, z, mixture, K_init=None, check_stability=True,
-                        tol=tol, maxiter=maxiter)
+        # Successive substitution converged to the trivial solution
+        # (beta outside [0,1] or all-identical K values). This means the
+        # stability test flagged the feed as unstable but the trial
+        # initialization wasn't a true split -- classically this happens
+        # near the phase boundary or when the stability test used only
+        # one of the two trial phases. Fall through to single-phase
+        # evaluation rather than recursing (which would loop forever).
+        # We try BOTH density branches and pick lower Gibbs; if one branch
+        # doesn't exist physically (e.g. vapor branch above bubble curve),
+        # the corresponding density solver will fail to converge and we
+        # accept whichever branch did converge.
+        try:
+            rho_v = density_from_pressure(p, T, z, mixture, phase_hint="vapor")
+        except RuntimeError:
+            rho_v = None
+        try:
+            rho_l = density_from_pressure(p, T, z, mixture, phase_hint="liquid")
+        except RuntimeError:
+            rho_l = None
+        if rho_v is None and rho_l is None:
+            raise RuntimeError(
+                f"flash_pt: no density branch converged at p={p}, T={T}"
+            )
+        if rho_v is None:
+            rho = rho_l; phase_label = "liquid"
+        elif rho_l is None:
+            rho = rho_v; phase_label = "vapor"
+        elif abs(rho_v - rho_l) / max(rho_v, rho_l) < 1e-4:
+            if T > np.dot(z, mixture.T_c):
+                phase_label = "supercritical"
+            else:
+                phase_label = "vapor" if rho_v < 0.5 * mixture.reduce(z)[1] else "liquid"
+            rho = rho_v
+        else:
+            gv = _pure_caloric(rho_v, T, mixture, z)
+            gl = _pure_caloric(rho_l, T, mixture, z)
+            if gv["h"] - T * gv["s"] < gl["h"] - T * gl["s"]:
+                rho = rho_v; phase_label = "vapor"
+            else:
+                rho = rho_l; phase_label = "liquid"
+        caloric = _pure_caloric(rho, T, mixture, z)
+        return MixtureFlashResult(
+            phase=phase_label, T=T, p=p, beta=None,
+            x=z.copy(), y=z.copy(), z=z, rho=rho,
+            rho_L=None, rho_V=None,
+            h=caloric["h"], s=caloric["s"],
+            iterations=niter, K=K,
+        )
 
     x, y, rho_L, rho_V = compositions
     # Overall density: 1/rho = beta/rho_V + (1-beta)/rho_L
@@ -1269,3 +1330,265 @@ def flash_ts(T, s_target, z, mixture, p_init=None, tol=1e-6, maxiter=40):
         p = p * np.exp(step)
 
     raise RuntimeError(f"flash_ts did not converge (T={T}, s={s_target})")
+
+
+# ---------------------------------------------------------------------------
+# TV and UV flashes -- the natural-variable flashes used in dynamic simulation
+# ---------------------------------------------------------------------------
+#
+# For dynamic (time-stepping) simulation, the conserved quantities in a
+# constant-volume control mass are internal energy U, volume V, and moles
+# n_i.  After advancing U and V by one time step we need to recover the
+# intensive thermodynamic state, i.e. solve
+#
+#     u(T, v, z) = u*,          v = V/n = 1/rho
+#
+# for the temperature T (and, if two-phase, the vapor fraction beta).
+# This is the UV flash.  The TV flash is the simpler sub-problem: given
+# (T, v, z), determine whether the bulk state is single-phase or two-phase
+# and return the consistent pressure, densities, and compositions.
+#
+# Design (matches PH/PS pattern in this module):
+#   * flash_tv:  inner pressure solve such that 1/rho_mix(T, p) = v_target.
+#                Uses secant on ln(p), scanning from a vapor-side starting
+#                point towards the liquid side.
+#   * flash_uv:  outer Newton on T with du/dT evaluated by finite difference
+#                through flash_tv.
+
+def flash_tv(T, v_target, z, mixture, p_init=None, tol=1e-8, maxiter=60):
+    """TV flash: given (T, v_target, z), find the pressure such that the
+    bulk mixture molar volume equals v_target.
+
+    In a two-phase region, the outer phase-fraction beta adjusts so that
+    the volume-weighted average matches. Returns a MixtureFlashResult.
+
+    Parameters
+    ----------
+    T : float                    Temperature [K]
+    v_target : float             Target molar volume [m^3/mol]  (= 1/rho_target)
+    z : array-like               Feed composition (mole fractions, sums to 1)
+    mixture : Mixture            Mixture object
+    p_init : float, optional     Initial pressure guess [Pa]. If None, uses
+                                 ideal-gas estimate p = RT/v.
+    tol : float                  Relative tolerance on v (default 1e-8)
+    maxiter : int                Maximum outer iterations
+
+    Notes
+    -----
+    Algorithm: secant in ln(p). At each iterate run flash_pt(p, T, z) and
+    compute v_calc = 1/rho_bulk, then solve v_calc(ln p) = v_target by
+    bracketing secant with bisection fallback.
+    """
+    z = np.asarray(z, dtype=np.float64)
+    z = z / z.sum()
+    rho_target = 1.0 / v_target
+
+    R_first = mixture.components[0].fluid.R
+
+    # Initial guess: ideal-gas p = RT/v works well for vapor/supercritical.
+    # For liquid-side v (small v, high rho), the ideal-gas estimate can land
+    # on a far-too-high pressure where flash_pt's internal density solves
+    # sometimes struggle. Detect liquid-side targets by comparing v_target
+    # to a crude vapor-side reference (ideal gas at 1 atm): if v_target is
+    # much smaller than that, use a moderate starting pressure (1 MPa)
+    # that's more likely to land on a well-conditioned density root.
+    R = R_first
+    v_ref_vapor = R * T / 1e5   # vapor-side v at 1 atm
+    if p_init is None:
+        if v_target < 0.01 * v_ref_vapor:
+            # Liquid-side target: start at 1 MPa (moderate pressure where
+            # the liquid root of density_from_pressure is well-defined).
+            p_init = 1e6
+        else:
+            p_init = R * T / v_target
+    p = max(float(p_init), 1.0)
+
+    def v_residual(p_val):
+        r = flash_pt(p_val, T, z, mixture, check_stability=False, tol=1e-10)
+        return 1.0 / r.rho - v_target, r
+
+    # Initial probe
+    res1, r1 = v_residual(p)
+    if abs(res1) < tol * abs(v_target):
+        return r1
+
+    # Get a second point for secant. Pressure moves v in the opposite
+    # direction (higher p -> smaller v); so if res1 > 0 (v_calc too big)
+    # increase p, else decrease p.
+    p2 = p * 2.0 if res1 > 0 else p * 0.5
+    res2, r2 = v_residual(p2)
+    if abs(res2) < tol * abs(v_target):
+        return r2
+
+    # Track the iterate with smallest |residual| so we can return it if
+    # we stagnate near the answer (at dense-liquid states, flash_pt's own
+    # density resolution limits how tightly we can satisfy v_target).
+    best_res, best_r = (res1, r1) if abs(res1) <= abs(res2) else (res2, r2)
+
+    # Bracket search: expand if same-sign
+    expand = 0
+    while res1 * res2 > 0 and expand < 20:
+        if abs(res2) < abs(res1):
+            p, res1, r1 = p2, res2, r2
+            p2 = p2 * 2.0 if res2 > 0 else p2 * 0.5
+        else:
+            p2 = p2 * 2.0 if res2 > 0 else p2 * 0.5
+        res2, r2 = v_residual(p2)
+        if abs(res2) < abs(best_res):
+            best_res, best_r = res2, r2
+        if abs(res2) < tol * abs(v_target):
+            return r2
+        expand += 1
+
+    # Now we have either a bracket or similar points; do secant with
+    # bracket-preserving fallback
+    prev_best_res = abs(best_res)
+    stagnation_count = 0
+    for it in range(maxiter):
+        # Secant step in ln(p)
+        lnp = np.log(p); lnp2 = np.log(p2)
+        if abs(res2 - res1) < 1e-30:
+            # Nearly flat -- midpoint
+            lnp_new = 0.5 * (lnp + lnp2)
+        else:
+            lnp_new = lnp2 - res2 * (lnp2 - lnp) / (res2 - res1)
+        # Safeguard: if outside bracket (when bracket exists), bisect
+        if res1 * res2 < 0:
+            lo, hi = (lnp, lnp2) if lnp < lnp2 else (lnp2, lnp)
+            if not (lo <= lnp_new <= hi):
+                lnp_new = 0.5 * (lo + hi)
+        p_new = float(np.exp(lnp_new))
+        res_new, r_new = v_residual(p_new)
+        if abs(res_new) < abs(best_res):
+            best_res, best_r = res_new, r_new
+        if abs(res_new) < tol * abs(v_target):
+            return r_new
+
+        # Stagnation: if best_res isn't improving, we've hit the density
+        # resolution limit of flash_pt. Return the best iterate if it's
+        # within a reasonable relative tolerance.
+        if abs(best_res) >= prev_best_res * 0.9:
+            stagnation_count += 1
+            if stagnation_count >= 3 and abs(best_res) < 1e-5 * abs(v_target):
+                return best_r
+        else:
+            stagnation_count = 0
+        prev_best_res = abs(best_res)
+
+        # Shift for next iteration: keep the point that maintains the
+        # bracket (if one exists), otherwise drop the oldest.
+        if res1 * res2 < 0:
+            # Bracket exists; keep the side that makes a new bracket
+            if res_new * res1 < 0:
+                p2, res2, r2 = p_new, res_new, r_new
+            else:
+                p, res1, r1 = p_new, res_new, r_new
+        else:
+            # No bracket; slide: (p, p2) -> (p2, p_new)
+            p, res1, r1 = p2, res2, r2
+            p2, res2, r2 = p_new, res_new, r_new
+
+    # Loop exhausted. If the best iterate is within a loose relative
+    # tolerance (1e-4), return it with a note; otherwise raise.
+    if abs(best_res) < 1e-4 * abs(v_target):
+        return best_r
+    raise RuntimeError(
+        f"flash_tv did not converge (T={T}, v={v_target}, "
+        f"last p={p2:.3e}, last v={1.0/r2.rho:.3e}, "
+        f"best |res|={abs(best_res):.3e})"
+    )
+
+
+def flash_uv(u_target, v_target, z, mixture,
+             T_init=None, tol=1e-6, maxiter=40):
+    """UV flash: given (u_target, v_target, z), find (T, p, phase).
+
+    The internal energy u is recovered from h, p, rho via u = h - p/rho,
+    since MixtureFlashResult stores h and rho.
+
+    Parameters
+    ----------
+    u_target : float             Target molar internal energy [J/mol]
+    v_target : float             Target molar volume [m^3/mol]
+    z : array-like               Feed composition
+    mixture : Mixture            Mixture object
+    T_init : float, optional     Initial temperature [K]. If None, uses
+                                 mole-weighted component Tc.
+    tol : float                  Relative tolerance on u
+    maxiter : int                Maximum outer Newton iterations
+
+    Returns
+    -------
+    MixtureFlashResult
+        The standard flash result; use `result.h - result.p / result.rho`
+        to recover u at the converged state.
+
+    Notes
+    -----
+    Outer 1-D Newton on T:
+        f(T) = u(T, v_target) - u_target
+        f'(T) ~ cv_mix (approximated by finite difference through flash_tv)
+    At each T we solve flash_tv to enforce the volume constraint.
+    """
+    z = np.asarray(z, dtype=np.float64)
+    z = z / z.sum()
+
+    if T_init is None:
+        T_init = float(np.dot(z, mixture.T_c))
+    T = max(float(T_init), 50.0)
+
+    u_scale = max(1.0, abs(u_target))
+
+    # For damped Newton: track best result so far in case of divergence
+    best_diff = np.inf
+    best_result = None
+    last_p = None
+
+    for it in range(maxiter):
+        r = flash_tv(T, v_target, z, mixture, p_init=last_p, tol=1e-10)
+        u_calc = r.h - r.p / r.rho
+        diff = u_calc - u_target
+
+        if abs(diff) < best_diff:
+            best_diff = abs(diff)
+            best_result = r
+
+        if abs(diff) < tol * u_scale:
+            return r
+
+        # Derivative: du/dT at constant v ~ cv_mix. Finite-difference via a
+        # second flash_tv at T + dT; reuse the converged pressure as init
+        # to make the inner solve cheap.
+        last_p = r.p
+        dT = max(0.01, 1e-4 * T)
+        try:
+            r2 = flash_tv(T + dT, v_target, z, mixture, p_init=last_p, tol=1e-10)
+            u2 = r2.h - r2.p / r2.rho
+            cv_est = (u2 - u_calc) / dT
+        except RuntimeError:
+            # Backward FD fallback
+            r2 = flash_tv(T - dT, v_target, z, mixture, p_init=last_p, tol=1e-10)
+            u2 = r2.h - r2.p / r2.rho
+            cv_est = (u_calc - u2) / dT
+
+        if cv_est <= 0 or not np.isfinite(cv_est):
+            # Unphysical derivative; take a conservative bisection-style step
+            T = T * (1.05 if diff < 0 else 0.95)
+            continue
+
+        step = -diff / cv_est
+        # Damp: cap at 20% of T
+        if abs(step) > 0.2 * T:
+            step = 0.2 * T * np.sign(step)
+        T_new = T + step
+        if T_new <= 0:
+            T_new = 0.5 * T
+        T = T_new
+
+    # If outer loop exhausted but we made progress, return the best result
+    if best_result is not None and best_diff < tol * u_scale * 100:
+        return best_result
+    raise RuntimeError(
+        f"flash_uv did not converge (u={u_target}, v={v_target}, "
+        f"last T={T}, last |du|={best_diff:.3e})"
+    )

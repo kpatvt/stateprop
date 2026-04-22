@@ -29,9 +29,11 @@ from .properties import _pressure_kernel, _dp_drho_T_kernel
 
 
 def _mu_over_RT(rho, T, R, rho_c, T_c,
-                pn, pd, pt, en, ed, et, ec,
+                pn, pd, pt, en, ed, et, ec, eg,
                 gn, gd, gt, ge, geps, gb, ggam,
-                na, naa, nb, nB, nC, nD, nA, nbeta):
+                na, naa, nb, nB, nC, nD, nA, nbeta,
+                dn, dd, dt_, dld, dlt, dgd, dgt,
+                bn, bd, bt_, be, beps, bbeta, bgamma, bb):
     """Return (Ar + Z - 1 - ln(rho / ref)). Additive constants cancel in
     differences mu_L - mu_V.
     """
@@ -39,16 +41,18 @@ def _mu_over_RT(rho, T, R, rho_c, T_c,
     tau = T_c / T
     Ar, Ar_d, _, _, _, _ = alpha_r_derivs(delta, tau,
                                            pn, pd, pt,
-                                           en, ed, et, ec,
+                                           en, ed, et, ec, eg,
                                            gn, gd, gt, ge, geps, gb, ggam,
-                                           na, naa, nb, nB, nC, nD, nA, nbeta)
+                                           na, naa, nb, nB, nC, nD, nA, nbeta,
+                                           dn, dd, dt_, dld, dlt, dgd, dgt,
+                                           bn, bd, bt_, be, beps, bbeta, bgamma, bb)
     Z = 1.0 + delta * Ar_d
     return Ar + (Z - 1.0) - np.log(rho)
 
 
 def _density_newton(p_target, T, rho_init, fluid, tol=1e-10, maxiter=60):
     """Solve p(rho, T) = p_target at fixed T using a safeguarded Newton."""
-    args = fluid.pack()[:25]  # residual part only for pressure
+    args = fluid.pack()[:41]  # residual part only for pressure
     rho = float(rho_init)
     for _ in range(maxiter):
         p = _pressure_kernel(rho, T, *args)
@@ -103,7 +107,7 @@ def density_from_pressure(p, T, fluid, phase="auto"):
         else:
             try:
                 rL, rV, _ = saturation_pT(T, fluid)
-                rho0 = rL if p > _pressure_kernel(rL, T, *fluid.pack()[:25]) * 0.999 else rV
+                rho0 = rL if p > _pressure_kernel(rL, T, *fluid.pack()[:41]) * 0.999 else rV
             except Exception:
                 rho0 = fluid.rho_c * 2.5 if p > fluid.p_c else p / (fluid.R * T)
     return _density_newton(p, T, rho0, fluid)
@@ -193,7 +197,7 @@ def saturation_pT(T, fluid, tol=1e-9, maxiter=80):
     if T < fluid.T_min:
         raise ValueError(f"T={T} below validity Tmin={fluid.T_min}")
 
-    args = fluid.pack()[:25]
+    args = fluid.pack()[:41]
     R = fluid.R
 
     # Initial densities via ancillary

@@ -32,11 +32,15 @@ Mixture support (multicomponent, GERG-style multi-fluid):
 
 Cubic EOS (PR, SRK, RK, vdW):
     stateprop.cubic submodule -- see stateprop.cubic docstring.
-    CubicEOS, PR, SRK, RK, VDW
+    CubicEOS, PR, PR78, SRK, RK, VDW
+    PR_MC, SRK_MC, PR_Twu, SRK_Twu, PRSV  (alpha-function variants)
     CubicMixture (van der Waals one-fluid mixing with k_ij)
+    Peneloux-style volume translation via CubicEOS(..., volume_shift_c=...)
     flash_pt, flash_ph, flash_ps, flash_th, flash_ts
     stability_test_TPD
     bubble_point_p, bubble_point_T, dew_point_p, dew_point_T
+    critical_point (Heidemann-Khalil / Michelsen, analytic derivatives)
+    envelope_point, trace_envelope (phase envelope, critical-seeded)
 """
 from .fluid import Fluid, load_fluid
 from .core import (
@@ -59,7 +63,7 @@ from .phase_envelope import trace_phase_envelope, PhaseEnvelope
 from . import mixture
 from . import cubic
 
-__version__ = "0.4.1"
+__version__ = "0.9.4"
 
 __all__ = [
     # Core

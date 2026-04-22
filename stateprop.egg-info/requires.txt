@@ -1,0 +1,8 @@
+numpy>=1.20
+
+[dev]
+pytest
+numba>=0.56
+
+[fast]
+numba>=0.56

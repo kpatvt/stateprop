@@ -91,10 +91,21 @@ def _alpha_r_polynomial(delta, tau, n, d, t):
 
 
 @njit(cache=True, fastmath=False)
-def _alpha_r_exponential(delta, tau, n, d, t, c):
-    """Sum of n_i * delta^d_i * tau^t_i * exp(-delta^c_i).
+def _alpha_r_exponential(delta, tau, n, d, t, c, g):
+    """Sum of n_i * delta^d_i * tau^t_i * exp(-g_i * delta^c_i).
 
-    Uses the standard Span-Wagner derivative structure.
+    For the standard Span-Wagner exponential form, g_i = 1; for the
+    generalized "ResidualHelmholtzExponential" form (CoolProp), g_i can
+    take other values. The math is structurally identical -- everywhere
+    the standard kernel computes `delta^c` and uses it in derivatives,
+    we use `g * delta^c` instead. Specifically:
+
+      f1 = d - c*delta^c    becomes    f1 = d - c*(g*delta^c)
+      f2 = (d - c*delta^c)*(d-1-c*delta^c) - c^2*delta^c
+                            becomes    f2 = (d - c*(g*delta^c))*(d-1-c*(g*delta^c)) - c^2*(g*delta^c)
+
+    which is precisely d^2(delta^d * exp(-g*delta^c)) / d(delta)^2 * delta^2 /
+    (delta^d * exp(-g*delta^c)) -- verified by direct differentiation.
     """
     A = 0.0
     A_d = 0.0
@@ -108,22 +119,21 @@ def _alpha_r_exponential(delta, tau, n, d, t, c):
         di = d[i]
         ti = t[i]
         ci = c[i]
-        dc = delta ** ci
-        # term = n * delta^d * tau^t * exp(-delta^c)
+        gi = g[i]
+        # The "x" used throughout the derivative formulas: x = g*delta^c
+        dc = gi * (delta ** ci)
+        # term = n * delta^d * tau^t * exp(-g*delta^c)
         term = n[i] * np.exp(di * ln_delta + ti * ln_tau - dc)
         A += term
-        # d/d(delta): multiply by (d - c*delta^c) / delta
+        # First derivative factor (d - c*x) where x = g*delta^c
         f1 = di - ci * dc
         A_d += f1 * term / delta
-        # d^2/d(delta)^2
-        # second derivative factor (Span-Wagner eq. 7.16 style):
-        #   (d - c*delta^c)*(d - 1 - c*delta^c) - c^2 * delta^c
+        # Second derivative factor: (d - c*x)*(d - 1 - c*x) - c^2 * x
         f2 = (di - ci * dc) * (di - 1.0 - ci * dc) - ci * ci * dc
         A_dd += f2 * term / (delta * delta)
-        # tau derivatives are straightforward (the exp(-delta^c) factor is tau-independent)
+        # tau derivatives unchanged (the exp factor is tau-independent)
         A_t += ti * term / tau
         A_tt += ti * (ti - 1.0) * term / (tau * tau)
-        # cross derivative: t * (d - c*delta^c) / (delta*tau)
         A_dt += ti * f1 * term / (delta * tau)
     return (A, A_d, A_t, A_dd, A_tt, A_dt)
 
@@ -353,25 +363,152 @@ def _alpha_r_nonanalytic(delta, tau, n, a, b, B, C, D, A_, beta):
 
 
 @njit(cache=True, fastmath=False)
+def _alpha_r_double_exponential(delta, tau, n, d, t, ld, lt, gd, gt):
+    """Sum of n_i * delta^d_i * tau^t_i * exp(-gd_i * delta^ld_i - gt_i * tau^lt_i).
+
+    Covers two CoolProp forms:
+      - ResidualHelmholtzDoubleExponential (Methanol, 8 terms)
+      - ResidualHelmholtzLemmon2005 m>0 sub-terms (R125, 3 terms; gd=gt=1 implicit)
+
+    The derivative structure follows the same f1/f2 pattern as the standard
+    exponential kernel, applied symmetrically in both delta and tau directions:
+
+      Let Delta = gd * delta^ld,  Tdecay = gt * tau^lt
+      f1_delta = d - ld*Delta,       f1_tau = t - lt*Tdecay
+      f2_delta = (d - ld*Delta)*(d - 1 - ld*Delta) - ld^2 * Delta
+      f2_tau   = (t - lt*Tdecay)*(t - 1 - lt*Tdecay) - lt^2 * Tdecay
+
+    Because the log of the term is separable in delta and tau, the cross
+    derivative factorizes: f_dt = term * f1_delta * f1_tau / (delta * tau).
+
+    Verified algebraically and numerically (finite difference) to machine
+    precision for first derivatives and to O(h^2) for second derivatives.
+    """
+    A = 0.0
+    A_d = 0.0
+    A_t = 0.0
+    A_dd = 0.0
+    A_tt = 0.0
+    A_dt = 0.0
+    ln_delta = np.log(delta)
+    ln_tau = np.log(tau)
+    for i in range(n.shape[0]):
+        di = d[i]
+        ti = t[i]
+        ldi = ld[i]
+        lti = lt[i]
+        gdi = gd[i]
+        gti = gt[i]
+        Delta = gdi * (delta ** ldi)      # x_delta in derivative formulas
+        Tdecay = gti * (tau ** lti)       # x_tau   in derivative formulas
+        term = n[i] * np.exp(di * ln_delta + ti * ln_tau - Delta - Tdecay)
+        A += term
+        f1_d = di - ldi * Delta
+        f1_t = ti - lti * Tdecay
+        A_d += f1_d * term / delta
+        A_t += f1_t * term / tau
+        f2_d = (di - ldi * Delta) * (di - 1.0 - ldi * Delta) - ldi * ldi * Delta
+        f2_t = (ti - lti * Tdecay) * (ti - 1.0 - lti * Tdecay) - lti * lti * Tdecay
+        A_dd += f2_d * term / (delta * delta)
+        A_tt += f2_t * term / (tau * tau)
+        A_dt += f1_d * f1_t * term / (delta * tau)
+    return (A, A_d, A_t, A_dd, A_tt, A_dt)
+
+
+@njit(cache=True, fastmath=False)
+def _alpha_r_gaob(delta, tau, n, d, t, eta, eps, beta, gamma, b):
+    """Sum of n_i * delta^d_i * tau^t_i * exp(eta_i*(delta-eps_i)^2
+                                              + 1/(beta_i*(tau-gamma_i)^2 + b_i)).
+
+    This is the Gao-Bubble form used by the Gao 2020 Ammonia EOS. It differs
+    from the standard Gaussian term (_alpha_r_gaussian) in the tau direction:
+    the Gaussian uses -beta*(tau-gamma)^2 in the exponent, while GaoB uses
+    +1/(beta*(tau-gamma)^2 + b). The "+ b" in the denominator keeps the term
+    finite at tau = gamma; note that eta in this form is typically negative
+    to provide density decay.
+
+    Derivative formulas (verified numerically):
+
+      Let A = eta*(delta-eps)^2,  D = beta*(tau-gamma)^2 + b,  B = 1/D.
+      log(term) = log(n) + t*ln(tau) + d*ln(delta) + A + B
+      g_d        = d/delta + 2*eta*(delta-eps)
+      g_dd_prime = -d/delta^2 + 2*eta
+      g_t        = t/tau - 2*beta*(tau-gamma)/D^2
+      g_tt_prime = -t/tau^2 - 2*beta/D^2 + 8*beta^2*(tau-gamma)^2 / D^3
+
+    Then f_d = term*g_d, f_dd = term*(g_d^2 + g_dd_prime), analogously for
+    tau, and f_dt = term*g_d*g_t (cross partial of log vanishes).
+    """
+    A = 0.0
+    A_d = 0.0
+    A_t = 0.0
+    A_dd = 0.0
+    A_tt = 0.0
+    A_dt = 0.0
+    ln_delta = np.log(delta)
+    ln_tau = np.log(tau)
+    for i in range(n.shape[0]):
+        di = d[i]
+        ti = t[i]
+        eta_i = eta[i]
+        eps_i = eps[i]
+        beta_i = beta[i]
+        gamma_i = gamma[i]
+        b_i = b[i]
+        dd = delta - eps_i
+        dt = tau - gamma_i
+        D_val = beta_i * dt * dt + b_i
+        A_exp = eta_i * dd * dd
+        B_exp = 1.0 / D_val
+        term = n[i] * np.exp(di * ln_delta + ti * ln_tau + A_exp + B_exp)
+        A += term
+        g_d = di / delta + 2.0 * eta_i * dd
+        g_dd_prime = -di / (delta * delta) + 2.0 * eta_i
+        g_t = ti / tau - 2.0 * beta_i * dt / (D_val * D_val)
+        g_tt_prime = (-ti / (tau * tau)
+                      - 2.0 * beta_i / (D_val * D_val)
+                      + 8.0 * beta_i * beta_i * dt * dt / (D_val * D_val * D_val))
+        A_d  += term * g_d
+        A_t  += term * g_t
+        A_dd += term * (g_d * g_d + g_dd_prime)
+        A_tt += term * (g_t * g_t + g_tt_prime)
+        A_dt += term * g_d * g_t
+    return (A, A_d, A_t, A_dd, A_tt, A_dt)
+
+
+@njit(cache=True, fastmath=False)
 def _alpha_r_kernel(delta, tau,
                     pn, pd, pt,                 # polynomial arrays
-                    en, ed, et, ec,             # exponential arrays
+                    en, ed, et, ec, eg,         # exponential arrays (eg = g multiplier; default 1.0)
                     gn, gd, gt, ge, geps, gb, ggam,   # gaussian arrays
-                    na, naa, nb, nB, nC, nD, nA, nbeta):   # non-analytic arrays
-    """Sum of all four residual term types.
+                    na, naa, nb, nB, nC, nD, nA, nbeta,   # non-analytic arrays
+                    dn, dd, dt_, dld, dlt, dgd, dgt,     # double-exponential arrays
+                    bn, bd, bt_, be, beps, bbeta, bgamma, bb):   # GaoB arrays
+    """Sum of all six residual term types.
 
-    Non-analytic arg order matches pack(): (n, a, b, B, C, D, A, beta).
+    `eg` is the per-term g multiplier inside the exponential
+    `exp(-eg * delta^ec)`; for standard Span-Wagner exponential terms
+    eg[i] = 1, for CoolProp's generalized ResidualHelmholtzExponential
+    form eg[i] can take other values.
+
+    The `d*` arrays feed _alpha_r_double_exponential (covers both Methanol's
+    ResidualHelmholtzDoubleExponential block and R125's Lemmon2005 m>0 sub-
+    terms). The `b*` arrays feed _alpha_r_gaob (Ammonia).
     """
     A1, A1d, A1t, A1dd, A1tt, A1dt = _alpha_r_polynomial(delta, tau, pn, pd, pt)
-    A2, A2d, A2t, A2dd, A2tt, A2dt = _alpha_r_exponential(delta, tau, en, ed, et, ec)
+    A2, A2d, A2t, A2dd, A2tt, A2dt = _alpha_r_exponential(delta, tau, en, ed, et, ec, eg)
     A3, A3d, A3t, A3dd, A3tt, A3dt = _alpha_r_gaussian(delta, tau, gn, gd, gt, ge, geps, gb, ggam)
     A4, A4d, A4t, A4dd, A4tt, A4dt = _alpha_r_nonanalytic(delta, tau, na, naa, nb, nB, nC, nD, nA, nbeta)
-    return (A1 + A2 + A3 + A4,
-            A1d + A2d + A3d + A4d,
-            A1t + A2t + A3t + A4t,
-            A1dd + A2dd + A3dd + A4dd,
-            A1tt + A2tt + A3tt + A4tt,
-            A1dt + A2dt + A3dt + A4dt)
+    A5, A5d, A5t, A5dd, A5tt, A5dt = _alpha_r_double_exponential(
+        delta, tau, dn, dd, dt_, dld, dlt, dgd, dgt)
+    A6, A6d, A6t, A6dd, A6tt, A6dt = _alpha_r_gaob(
+        delta, tau, bn, bd, bt_, be, beps, bbeta, bgamma, bb)
+    return (A1 + A2 + A3 + A4 + A5 + A6,
+            A1d + A2d + A3d + A4d + A5d + A6d,
+            A1t + A2t + A3t + A4t + A5t + A6t,
+            A1dd + A2dd + A3dd + A4dd + A5dd + A6dd,
+            A1tt + A2tt + A3tt + A4tt + A5tt + A6tt,
+            A1dt + A2dt + A3dt + A4dt + A5dt + A6dt)
 
 
 # ---------------------------------------------------------------------------
@@ -388,9 +525,18 @@ def _alpha_r_kernel(delta, tau,
 #   5 = PE:             a * ln(1 - exp(-b*tau))
 #   6 = PE_cosh:        a * ln(cosh(b*tau))
 #   7 = PE_sinh:        a * ln(|sinh(b*tau)|)
+#   8 = tau_log_tau:    a * tau * ln(tau)                        (n-Undecane CP0PolyT t=-1)
+#   9 = PE_general:     a * ln(c_const + d_const * exp(-b*tau))  (Air; c, d in extra arrays)
 
 @njit(cache=True, fastmath=False)
-def _alpha_0_kernel(delta, tau, codes, a_arr, b_arr):
+def _alpha_0_kernel(delta, tau, codes, a_arr, b_arr, c_arr, d_arr):
+    """Compute alpha_0 and its derivatives.
+
+    The c_arr and d_arr arrays carry the extra constants for the
+    PE_general (code 9) term type. For terms other than code 9, their
+    entries are ignored. For fluids without code-9 terms, these can be
+    zero arrays of the same length as codes.
+    """
     A = 0.0
     A_d = 0.0
     A_t = 0.0
@@ -461,6 +607,32 @@ def _alpha_0_kernel(delta, tau, codes, a_arr, b_arr):
             # d^2/d(tau)^2 = -a*b^2*csch^2(bt) = -a*b^2*(1/sinh^2)
             sh = np.sinh(bt)
             A_tt += -a * b * b / (sh * sh)
+        elif c == 8:
+            # a * tau * ln(tau)  (n-Undecane CP0PolyT t=-1 reproduction)
+            ln_tau = np.log(tau)
+            A += a * tau * ln_tau
+            # d/d(tau) = a * (ln(tau) + 1)
+            A_t += a * (ln_tau + 1.0)
+            # d^2/d(tau)^2 = a / tau
+            A_tt += a / tau
+        elif c == 9:
+            # a * ln(c_const + d_const * exp(-b*tau))   (generalized PE for Air)
+            # c_const, d_const carried in c_arr[i], d_arr[i]
+            c_const = c_arr[i]
+            d_const = d_arr[i]
+            e = np.exp(-b * tau)
+            den = c_const + d_const * e
+            A += a * np.log(den)
+            # d/d(tau) ln(c + d*e^{-b*tau}) = -b*d*e^{-b*tau} / (c + d*e^{-b*tau})
+            # = -b * d_const * e / den
+            num1 = -b * d_const * e
+            A_t += a * num1 / den
+            # d^2/d(tau)^2 by quotient rule:
+            #   d/dtau (num1/den) = (num1' * den - num1 * den') / den^2
+            # num1' = -b * d_const * (-b) * e = b^2 * d_const * e
+            # den'  = -b * d_const * e = num1
+            num1_prime = b * b * d_const * e
+            A_tt += a * (num1_prime * den - num1 * num1) / (den * den)
         # (unknown codes silently skipped)
     return (A, A_d, A_t, A_dd, A_tt, A_dt)
 
@@ -472,37 +644,45 @@ def _alpha_0_kernel(delta, tau, codes, a_arr, b_arr):
 @njit(cache=True)
 def alpha_r_derivs(delta, tau,
                    pn, pd, pt,
-                   en, ed, et, ec,
+                   en, ed, et, ec, eg,
                    gn, gd, gt, ge, geps, gb, ggam,
-                   na, naa, nb, nB, nC, nD, nA, nbeta):
+                   na, naa, nb, nB, nC, nD, nA, nbeta,
+                   dn, dd, dt_, dld, dlt, dgd, dgt,
+                   bn, bd, bt_, be, beps, bbeta, bgamma, bb):
     """All six residual-part derivatives at (delta, tau)."""
     return _alpha_r_kernel(delta, tau,
                            pn, pd, pt,
-                           en, ed, et, ec,
+                           en, ed, et, ec, eg,
                            gn, gd, gt, ge, geps, gb, ggam,
-                           na, naa, nb, nB, nC, nD, nA, nbeta)
+                           na, naa, nb, nB, nC, nD, nA, nbeta,
+                           dn, dd, dt_, dld, dlt, dgd, dgt,
+                           bn, bd, bt_, be, beps, bbeta, bgamma, bb)
 
 
 @njit(cache=True)
-def alpha_0_derivs(delta, tau, codes, a_arr, b_arr):
+def alpha_0_derivs(delta, tau, codes, a_arr, b_arr, c_arr, d_arr):
     """All six ideal-part derivatives at (delta, tau)."""
-    return _alpha_0_kernel(delta, tau, codes, a_arr, b_arr)
+    return _alpha_0_kernel(delta, tau, codes, a_arr, b_arr, c_arr, d_arr)
 
 
 @njit(cache=True)
 def alpha_derivs(delta, tau,
                  pn, pd, pt,
-                 en, ed, et, ec,
+                 en, ed, et, ec, eg,
                  gn, gd, gt, ge, geps, gb, ggam,
                  na, naa, nb, nB, nC, nD, nA, nbeta,
-                 codes, a_arr, b_arr):
+                 dn, dd, dt_, dld, dlt, dgd, dgt,
+                 bn, bd, bt_, be, beps, bbeta, bgamma, bb,
+                 codes, a_arr, b_arr, c_arr, d_arr):
     """Total alpha = alpha_0 + alpha_r and all derivatives."""
     R = _alpha_r_kernel(delta, tau,
                         pn, pd, pt,
-                        en, ed, et, ec,
+                        en, ed, et, ec, eg,
                         gn, gd, gt, ge, geps, gb, ggam,
-                        na, naa, nb, nB, nC, nD, nA, nbeta)
-    I = _alpha_0_kernel(delta, tau, codes, a_arr, b_arr)
+                        na, naa, nb, nB, nC, nD, nA, nbeta,
+                        dn, dd, dt_, dld, dlt, dgd, dgt,
+                        bn, bd, bt_, be, beps, bbeta, bgamma, bb)
+    I = _alpha_0_kernel(delta, tau, codes, a_arr, b_arr, c_arr, d_arr)
     return (R[0] + I[0], R[1] + I[1], R[2] + I[2],
             R[3] + I[3], R[4] + I[4], R[5] + I[5])
 
@@ -510,34 +690,42 @@ def alpha_derivs(delta, tau,
 @njit(cache=True)
 def alpha(delta, tau,
           pn, pd, pt,
-          en, ed, et, ec,
+          en, ed, et, ec, eg,
           gn, gd, gt, ge, geps, gb, ggam,
           na, naa, nb, nB, nC, nD, nA, nbeta,
-          codes, a_arr, b_arr):
+          dn, dd, dt_, dld, dlt, dgd, dgt,
+          bn, bd, bt_, be, beps, bbeta, bgamma, bb,
+          codes, a_arr, b_arr, c_arr, d_arr):
     """Scalar alpha(delta, tau) = alpha_0 + alpha_r."""
     return alpha_derivs(delta, tau,
                         pn, pd, pt,
-                        en, ed, et, ec,
+                        en, ed, et, ec, eg,
                         gn, gd, gt, ge, geps, gb, ggam,
                         na, naa, nb, nB, nC, nD, nA, nbeta,
-                        codes, a_arr, b_arr)[0]
+                        dn, dd, dt_, dld, dlt, dgd, dgt,
+                        bn, bd, bt_, be, beps, bbeta, bgamma, bb,
+                        codes, a_arr, b_arr, c_arr, d_arr)[0]
 
 
 @njit(cache=True)
 def alpha_r(delta, tau,
             pn, pd, pt,
-            en, ed, et, ec,
+            en, ed, et, ec, eg,
             gn, gd, gt, ge, geps, gb, ggam,
-            na, naa, nb, nB, nC, nD, nA, nbeta):
+            na, naa, nb, nB, nC, nD, nA, nbeta,
+            dn, dd, dt_, dld, dlt, dgd, dgt,
+            bn, bd, bt_, be, beps, bbeta, bgamma, bb):
     """Scalar residual alpha_r(delta, tau)."""
     return _alpha_r_kernel(delta, tau,
                            pn, pd, pt,
-                           en, ed, et, ec,
+                           en, ed, et, ec, eg,
                            gn, gd, gt, ge, geps, gb, ggam,
-                           na, naa, nb, nB, nC, nD, nA, nbeta)[0]
+                           na, naa, nb, nB, nC, nD, nA, nbeta,
+                           dn, dd, dt_, dld, dlt, dgd, dgt,
+                           bn, bd, bt_, be, beps, bbeta, bgamma, bb)[0]
 
 
 @njit(cache=True)
-def alpha_0(delta, tau, codes, a_arr, b_arr):
+def alpha_0(delta, tau, codes, a_arr, b_arr, c_arr, d_arr):
     """Scalar ideal alpha_0(delta, tau)."""
-    return _alpha_0_kernel(delta, tau, codes, a_arr, b_arr)[0]
+    return _alpha_0_kernel(delta, tau, codes, a_arr, b_arr, c_arr, d_arr)[0]

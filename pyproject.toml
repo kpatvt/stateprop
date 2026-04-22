@@ -2,29 +2,39 @@
 requires = ["setuptools>=61", "wheel"]
 build-backend = "setuptools.build_meta"
 
+# ---------------------------------------------------------------------------
+# Project metadata
+# ---------------------------------------------------------------------------
 [project]
-name = "stateprop"
-version = "0.2.0"
-description = "Numba-accelerated multiparameter Helmholtz equation of state for single-component thermodynamic properties"
-readme = "README.md"
+name            = "stateprop"
+version         = "0.9.4"
+description     = "Multiparameter Helmholtz equation of state for pure-fluid and mixture thermodynamic properties (Span-Wagner, IAPWS-95, GERG-2008) plus cubic equations of state (PR/SRK/RK/vdW with Mathias-Copeman, Twu, PRSV alpha-functions, Peneloux volume translation, mixture critical points and phase envelopes, optional chemicals-library lookup)."
+readme          = "README.md"
 requires-python = ">=3.9"
-license = {text = "MIT"}
-authors = [
-    {name = "stateprop contributors"}
-]
+license         = {text = "MIT"}
+authors         = [{name = "stateprop contributors"}]
 keywords = [
     "thermodynamics",
     "equation of state",
     "helmholtz",
+    "mixture",
+    "phase equilibrium",
+    "flash",
     "span-wagner",
-    "numba",
+    "iapws95",
+    "gerg-2008",
+    "natural gas",
+    "cubic eos",
+    "peng-robinson",
+    "soave-redlich-kwong",
+    "phase envelope",
     "fluids",
-    "CO2",
-    "nitrogen",
+    "CO2", "nitrogen", "water", "methane",
 ]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 4 - Beta",
     "Intended Audience :: Science/Research",
+    "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
@@ -33,6 +43,8 @@ classifiers = [
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering",
     "Topic :: Scientific/Engineering :: Chemistry",
     "Topic :: Scientific/Engineering :: Physics",
 ]
@@ -41,22 +53,49 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-fast = ["numba>=0.56"]      # Optional -- enables the JIT acceleration
-dev = [
-    "pytest",
+fast   = ["numba>=0.56"]      # JIT acceleration of the Helmholtz kernels
+chemdb = ["chemicals>=1.5"]   # Pure-component lookup (stateprop.cubic.from_chemicals)
+chem   = ["chemicals>=1.5"]   # Alias of `chemdb`
+dev    = [
     "numba>=0.56",
+    "chemicals>=1.5",
+    "pytest>=7",
+    "build",
+    "twine",
 ]
 
 [project.urls]
-Homepage = "https://github.com/your-org/stateprop"
-Issues = "https://github.com/your-org/stateprop/issues"
+Homepage      = "https://github.com/your-org/stateprop"
+Issues        = "https://github.com/your-org/stateprop/issues"
+Documentation = "https://github.com/your-org/stateprop#readme"
+Source        = "https://github.com/your-org/stateprop"
 
+# ---------------------------------------------------------------------------
+# Package discovery and data files
+# ---------------------------------------------------------------------------
+# `fluids/` lives INSIDE the stateprop package directory (since v0.6.2) so
+# that wheels include all packaged JSON data via the package-data mechanism.
 [tool.setuptools.packages.find]
+where   = ["."]
 include = ["stateprop*"]
+exclude = ["tests*", "examples*"]
 
 [tool.setuptools.package-data]
-stateprop = ["../fluids/*.json"]
+# Recursive glob picks up:
+#   stateprop/fluids/*.json              (top-level Span/IAPWS reference fluids)
+#   stateprop/fluids/gerg2008/*.json     (21 GERG-2008 simplified pure-fluid EOS)
+#   stateprop/fluids/binaries/*.json     (mixture binary parameters incl. GERG-2008)
+#   stateprop/fluids/components/*.json   (optional component wrappers)
+stateprop = ["fluids/**/*.json", "py.typed"]
 
+# ---------------------------------------------------------------------------
+# Test runner config
+# ---------------------------------------------------------------------------
+# stateprop's tests use a custom runner pattern (run_*.py with their own
+# main blocks) rather than pytest collection. They are discoverable by
+# pytest if needed but invoked directly on the command line for the most
+# part. Both naming conventions are configured here.
 [tool.pytest.ini_options]
-testpaths = ["tests"]
-python_files = ["test_*.py"]
+testpaths   = ["tests"]
+python_files = ["test_*.py", "run_*.py"]
+addopts     = "-ra -q"

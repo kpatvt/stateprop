@@ -195,6 +195,84 @@ def test_pt_flash():
     check("PT: high-T is supercritical", r.phase == 'supercritical')
 
 
+def test_arbitrary_component_flash_coolprop():
+    """PT flash on a non-GERG mixture using bundled CoolProp pure-fluid EOS.
+
+    Ethanol+water is a strongly non-ideal system (no binary parameters in
+    stateprop). With ideal mixing rules, the flash should still find the
+    two-phase region where the underlying EOS predicts instability, and
+    correctly partition components by their volatility ordering. Without
+    binary parameters the predicted compositions won't match real Dortmund
+    data exactly, but the qualitative behavior (ethanol enriched in vapor,
+    water enriched in liquid) must be physically correct.
+    """
+    mx = load_mixture(['ethanol', 'water'], [0.5, 0.5])
+
+    # Acentric factors must be loaded for Wilson K-factor initialization
+    eth_omega = mx.components[0].fluid.acentric_factor
+    wat_omega = mx.components[1].fluid.acentric_factor
+    check("ethanol acentric loaded", eth_omega is not None and 0.5 < eth_omega < 0.7,
+          f"got {eth_omega}")
+    check("water acentric loaded", wat_omega is not None and 0.3 < wat_omega < 0.4,
+          f"got {wat_omega}")
+
+    # At low pressure the flash should converge to a two-phase split with
+    # ethanol (more volatile) enriched in the vapor.
+    T, p = 350.0, 0.5e5
+    r = flash_pt(p, T, mx.x, mx)
+    check("ethanol+water 350K/0.5bar is two_phase",
+          r.phase == 'two_phase', f"got phase={r.phase}")
+    if r.phase == 'two_phase':
+        check("ethanol enriched in vapor (y_eth > x_eth)",
+              r.y[0] > r.x[0],
+              f"x_eth={r.x[0]:.3f}, y_eth={r.y[0]:.3f}")
+        check("water enriched in liquid (x_wat > y_wat)",
+              r.x[1] > r.y[1],
+              f"x_wat={r.x[1]:.3f}, y_wat={r.y[1]:.3f}")
+        # Fugacity equality: f_L = f_V at converged solution
+        f_L = r.x * np.exp(ln_phi(r.rho_L, T, r.x, mx)) * p
+        f_V = r.y * np.exp(ln_phi(r.rho_V, T, r.y, mx)) * p
+        err = np.max(np.abs(f_L / f_V - 1.0))
+        check("ethanol+water fugacity equality at converged flash",
+              err < 1e-5, f"err={err:.2e}")
+
+
+def test_arbitrary_component_single_phase_branches():
+    """PT flash correctly classifies single-phase branches for arbitrary
+    CoolProp mixtures: subcritical liquid, vapor, and supercritical."""
+    mx = load_mixture(['ethanol', 'water'], [0.5, 0.5])
+
+    # High pressure -> compressed liquid (above bubble curve)
+    r = flash_pt(5e6, 400.0, mx.x, mx)
+    check("ethanol+water 400K/5MPa is liquid",
+          r.phase == 'liquid', f"got phase={r.phase}")
+    check("liquid density physical (>1000 mol/m^3)",
+          r.rho > 1000, f"rho={r.rho}")
+
+    # Above both critical temperatures -> supercritical
+    # (T_c_eth=515, T_c_wat=647, so T=700 is supercritical for both)
+    r = flash_pt(1e5, 700.0, mx.x, mx)
+    check("ethanol+water 700K/1bar is supercritical or vapor",
+          r.phase in ('supercritical', 'vapor'),
+          f"got phase={r.phase}")
+
+
+def test_density_from_pressure_robustness():
+    """The Newton solver in density_from_pressure must handle the case
+    where float64 precision in the EOS pressure evaluation prevents
+    Newton from driving |dp| below the standard tol*p threshold. Without
+    a stalled-iteration check it would oscillate forever and raise
+    RuntimeError, breaking flash convergence at low pressures."""
+    from stateprop.mixture.properties import density_from_pressure
+    mx = load_mixture(['ethanol', 'water'], [0.5, 0.5])
+    T, p = 350.0, 0.5e5
+    # Composition near a converged liquid-flash solution for ethanol+water
+    x = np.array([0.42129067, 0.57870933])
+    rho_L = density_from_pressure(p, T, x, mx, phase_hint="liquid")
+    check("density_from_pressure converges at low p with H-bonding fluid",
+          29000 < rho_L < 30000, f"rho_L={rho_L}")
+
+
 def test_state_function_flashes():
     cases = [
         ("2-phase 220/3MPa", [0.5, 0.5], 220.0, 3e6),
@@ -416,6 +494,9 @@ if __name__ == "__main__":
         test_rachford_rice,
         test_stability,
         test_pt_flash,
+        test_arbitrary_component_flash_coolprop,
+        test_arbitrary_component_single_phase_branches,
+        test_density_from_pressure_robustness,
         test_state_function_flashes,
         test_bubble_dew_points,
         test_unreachable_bubble_dew,

@@ -32,10 +32,41 @@ All of these follow from standard identities applied to the six derivatives of
 
 ## Installation
 
+For end-users (once published to PyPI):
+
 ```bash
-pip install -e .                 # pure-Python mode (slow but works everywhere)
-pip install -e ".[fast]"         # adds Numba for ~50-100x speedup
-pip install -e ".[dev]"          # plus test tooling
+pip install stateprop                 # pure-Python mode
+pip install "stateprop[fast]"         # adds Numba for ~50-100x speedup
+```
+
+For development (editable install from a source checkout):
+
+```bash
+git clone https://github.com/your-org/stateprop && cd stateprop
+pip install -e .                      # editable, pure-Python
+pip install -e ".[fast]"              # editable + Numba
+pip install -e ".[dev]"               # plus test tooling and build/twine
+```
+
+The package bundles all the JSON fluid data inline (3 reference EOS
+fluids + 21 GERG-2008 simplified-EOS fluids + binary parameter sets),
+so no external data files are required at runtime — `load_fluid("water")`
+or `load_fluid("gerg2008/methane")` just works after `pip install`.
+
+The 10 test runners can be invoked directly against either an editable
+install or an installed wheel:
+
+```bash
+python tests/run_cubic_tests.py                   # 173 tests
+python tests/run_mixture_tests.py                 # 107 tests
+python tests/run_gerg_tests.py                    #  49 tests
+python tests/run_gerg_validation.py               #  52 tests
+python tests/run_gerg_caloric_validation.py       #  74 tests
+python tests/run_uv_flash_tests.py                #  45 tests
+python tests/run_chemicals_interface_tests.py     #  61 tests (fallback+chemicals)
+python tests/run_chemdb_tests.py                  #  10 tests (8 require `chemicals`)
+python tests/run_converter_tests.py               #  25 tests: CoolProp -> stateprop converter
+python tests/run_coolprop_fluids_tests.py         #  29 tests: bundled CoolProp fluid library (v0.9.3: 125 fluids)
 ```
 
 ## Quick start
@@ -116,6 +147,115 @@ PH, cp/T for PS, cv for UV, `(∂h/∂ρ)_T` and `(∂s/∂ρ)_T = -(1/ρ²)(∂
 from the Maxwell relation for TH/TS) and falls back to safeguarded damped
 Newton iterations.
 
+### UV flash for mixtures (v0.7.0)
+
+The UV flash is the natural-variable flash for transient / dynamic simulation:
+a conserved control mass has fixed `U`, `V`, and composition `n_i`; after a
+time step, we need to recover the intensive state `(T, p, phase)`.
+
+```python
+from stateprop.mixture.mixture import load_mixture
+from stateprop.mixture.flash import flash_pt, flash_uv
+
+# 5-component natural-gas mixture using the GERG-2008 EOS
+mix = load_mixture(
+    ["gerg2008/methane", "gerg2008/ethane", "gerg2008/propane",
+     "gerg2008/nitrogen", "gerg2008/carbondioxide"],
+    composition=[0.85, 0.05, 0.02, 0.05, 0.03],
+    binary_set="gerg2008",
+)
+z = [0.85, 0.05, 0.02, 0.05, 0.03]
+
+# Initial state
+r0 = flash_pt(1e5, 300.0, z, mix)
+u0 = r0.h - r0.p / r0.rho   # recover u from h and pv
+v0 = 1.0 / r0.rho
+
+# Adiabatic compression: volume halves at constant internal energy
+r1 = flash_uv(u0, v0 / 2, z, mix)
+print(f"T rose from 300 K to {r1.T:.2f} K, p rose to {r1.p/1e5:.2f} bar")
+```
+
+The same `flash_uv` and `flash_tv` are available for cubic-EOS mixtures via
+`stateprop.cubic.flash`, with identical call signatures. Two-phase states
+are handled automatically; the returned `phase` field will be `"two_phase"`
+with populated `beta`, `x`, `y`, `rho_L`, `rho_V`.
+
+### Pure-component lookup from the `chemicals` databank (v0.8.0)
+
+Building cubic components from a list of compound names, rather than hand-
+typing (T_c, p_c, omega, M) for each, is the common pain point when setting
+up a mixture. `stateprop.chemdb` is an optional interface to Caleb Bell's
+[`chemicals`](https://github.com/CalebBell/chemicals) library, which ships
+a curated databank of ~26,000 compounds indexed by CAS number with
+name/formula/SMILES lookup. The same functions are also available
+directly from `stateprop.cubic` (as `PR_from_name`,
+`cubic_mixture_from_names`, etc.) for users who prefer to stay inside
+one submodule.
+
+```python
+from stateprop.chemdb import (
+    PR_from_name, SRK_from_name,
+    cubic_mixture_from_names, components_from_names, lookup,
+)
+
+# Look up raw pure-component properties
+info = lookup("methane")
+# -> {'T_c': 190.564, 'p_c': 4599200.0, 'omega': 0.01142,
+#     'M': 0.01604246, 'source': 'chemicals' or 'fallback', 'CAS': '74-82-8'}
+
+# A single component by common name, formula, synonym, or CAS
+c_methane = PR_from_name("methane")
+c_r134a   = PR_from_name("R134a")              # or "1,1,1,2-Tetrafluoroethane"
+c_ethanol = SRK_from_name("64-17-5")           # CAS lookup
+c_hexane  = PR_from_name("n-hexane",
+                         volume_shift_c=-5e-6) # any CubicEOS kwarg passes through
+
+# A full mixture in one line:
+mix = cubic_mixture_from_names(
+    ["methane", "ethane", "propane", "nitrogen", "carbon dioxide"],
+    composition=[0.85, 0.05, 0.02, 0.05, 0.03],
+    family="pr",
+    k_ij={(0, 3): 0.025, (0, 4): 0.09, (3, 4): -0.017},
+)
+
+# Or get just the components and assemble the mixture yourself:
+comps = components_from_names(
+    ["methane", "ethane", "propane", "nitrogen", "carbon dioxide"],
+    family="pr",
+)
+```
+
+Supported families: `"pr"` (Peng-Robinson 1976/1978 with automatic
+switch), `"pr78"` (force PR-1978), `"srk"` (Soave-Redlich-Kwong),
+`"rk"` (original Redlich-Kwong), `"vdw"` (van der Waals). Family-
+specific shortcut wrappers `PR_from_name`, `PR78_from_name`,
+`SRK_from_name`, `RK_from_name`, `VDW_from_name` all share the same
+signature and forward any extra kwargs (e.g. `volume_shift_c`,
+`use_pr78`) to the underlying EOS factory. There is no hidden override
+of looked-up critical properties — if you need a non-databank `T_c`
+or `omega`, use the explicit `PR(T_c, p_c, omega)` factory.
+
+The `chemicals` dependency is **optional**. Install it with:
+
+```bash
+pip install 'stateprop[chemdb]'    # or just: pip install chemicals
+```
+
+**Fallback table:** if `chemicals` is not installed, `stateprop.chemdb`
+still works for the 21 GERG-2008 components (alkanes through n-decane,
+common inerts, water, H2S, H2, He, Ar) using a built-in reference-data
+table. This is enough for natural-gas workflows without a second
+dependency. Aliases like `CH4`, `c1`, `N2`, `CO2`, `n-butane`,
+`isobutane`, `H2O`, `He`, `Ar` all resolve correctly. Requests for
+substances outside the fallback table raise a `KeyError` with an
+install hint pointing at `pip install chemicals`.
+
+The `lookup(identifier)` function exposes the raw databank values and
+tells you where they came from via the `source` key (`"chemicals"`
+when the full library is available, `"fallback"` when using the
+built-in table), which is useful for audit trails.
+
 ## Phase envelope tracing
 
 Generate the full vapor-liquid coexistence curve for any fluid with a single
@@ -143,11 +283,81 @@ four-panel plot (p-T, T-s, p-h, T-ρ) of water.
 
 ## Included fluids
 
+### Standalone Helmholtz EOS (single-component reference equations)
+
 | Fluid            | Reference                                   | Validity         | Notes |
 | ---------------- | ------------------------------------------- | ---------------- | ----- |
 | `carbondioxide`  | Span & Wagner, *JPCRD* **25**, 1509 (1996)  | 216–1100 K, ≤ 800 MPa | 39 analytic terms (critical-enhancement terms omitted) |
-| `nitrogen`       | Span et al., *JPCRD* **29**, 1361 (2000)    | 63–2000 K, ≤ 2200 MPa | 36 analytic terms |
+| `nitrogen`       | Span et al., *JPCRD* **29**, 1361 (2000)    | 63–2000 K, ≤ 2200 MPa | 36 analytic terms. An ideal-gas polynomial sign error (producing cv⁰ ≈ 15.4 J/(mol K) at 300 K) was fixed in v0.6.3; both residual and caloric properties now agree with the reference to the expected accuracy. |
 | `water`          | IAPWS R6-95(2018) / Wagner & Pruß (2002)    | 273–1273 K, ≤ 1000 MPa | Full IAPWS-95: 56 terms incl. 2 non-analytic critical-enhancement terms |
+
+### CoolProp-derived reference EOS library (125 fluids, v0.9.3)
+
+A reference Helmholtz EOS bundled for each of the following fluids, ingested
+from the CoolProp project's curated fluid library (https://github.com/CoolProp/CoolProp/tree/master/dev/fluids)
+via `tools/build_fluid_library.py` (the converter in the same directory). Each fluid's
+JSON in `stateprop/fluids/coolprop/` carries a BibTeX citation pointing at
+the original publication, which should be cited in any work using the data:
+
+- **Refrigerants** (42): R11, R12, R13, R13I1, R14, R21, R22, R23, R32, R40, R41, R113, R114, R115, R116, R123, R124, R125, R134a, R141b, R142b, R143a, R152A, R161, R218, R227EA, R236EA, R236FA, R245ca, R245fa, R365MFC, R404A, R407C, R410A, R507A, R1234yf, R1234ze(E), R1234ze(Z), R1233zd(E), R1243zf, R1336mzz(E), RC318, HFE143m, Novec649, SES36
+- **Hydrocarbons** (18): Methane, Ethane, n-Propane, n-Butane, IsoButane, n-Pentane, Isopentane, Neopentane, n-Hexane, Isohexane, n-Heptane, n-Octane, n-Nonane, n-Decane, n-Undecane, n-Dodecane, CycloPropane, Propyne
+- **Alkenes** (6): Ethylene, Propylene, IsoButene, 1-Butene, cis-2-Butene, trans-2-Butene
+- **Aromatics** (6): Benzene, Toluene, EthylBenzene, m-Xylene, o-Xylene, p-Xylene
+- **Cyclics** (2): Cyclopentane, CycloHexane
+- **Light gases** (11): Hydrogen + OrthoH₂ + ParaH₂, Deuterium + OrthoD₂ + ParaD₂, Helium, Argon, Neon, Krypton, Xenon, Fluorine
+- **Atmospheric / industrial** (15): Air, Ammonia, Nitrogen, Oxygen, CarbonDioxide, CarbonMonoxide, NitrousOxide, SulfurDioxide, SulfurHexafluoride, HydrogenChloride, HydrogenSulfide, Chlorine, EthyleneOxide, CarbonylSulfide, Dichloroethane
+- **Silanes** (8): MM (D2), MDM, D4, D5, D6, MD2M, MD3M, MD4M
+- **Polar organics** (6): Methanol, Ethanol, DiethylEther, DimethylEther, DimethylCarbonate, Acetone
+- **Biodiesel methyl esters** (5): MethylLinoleate, MethylLinolenate, MethylOleate, MethylPalmitate, MethylStearate
+- **Heavy water and water** (2): HeavyWater, Water
+
+**Full coverage:** All 125 fluids in CoolProp's `dev/fluids/` directory are now supported as of v0.9.3.
+
+**v0.9.3 newly added vs v0.9.2** (3 fluids): Ammonia, R125, Methanol. Unlocked by adding two new residual-kernel term types to `stateprop/core.py`:
+
+1. **`_alpha_r_gaob`** — the Gao-Bubble form `n·δ^d·τ^t·exp(η(δ-ε)² + 1/(β(τ-γ)²+b))` used by the Gao 2020 Ammonia reference EOS. Differs from the standard Gaussian in the τ direction: uses a *rational* `1/(β(τ-γ)²+b)` instead of `-β(τ-γ)²`; the `+b` term keeps it finite at τ=γ. Verified by numerical finite-difference comparison to machine precision for first derivatives and O(h²) for second derivatives.
+
+2. **`_alpha_r_double_exponential`** — the double-decay form `n·δ^d·τ^t·exp(-gd·δ^ld - gt·τ^lt)`. Used directly by Methanol's `ResidualHelmholtzDoubleExponential` block (8 terms) and also by the 3 m>0 sub-terms of R125's `ResidualHelmholtzLemmon2005` block. The Lemmon2005 decomposition: 5 polynomial terms (l=m=0) go to `residual_polynomial`, 10 standard exponential terms (l>0, m=0) go to `residual_exponential`, and 3 double-decay terms (l,m both >0) go to `residual_double_exponential` with gd=gt=1. The f1/f2 derivative factors take the same structural form as the existing generalized exponential, applied symmetrically in both δ and τ directions.
+
+**v0.9.2 newly added vs v0.9.1** (9 fluids): Fluorine, Propyne, R114, R13, R14, R21, RC318, Air, n-Undecane. Unlocked by three coordinated extensions: (1) the residual exponential kernel was generalized from `exp(-δ^c)` to `exp(-g·δ^c)` to support CoolProp's `ResidualHelmholtzExponential` block (+7 fluids); (2) a new `tau_log_tau` ideal-gas term (kernel code 8) for the τ·ln(τ) contribution from `IdealGasHelmholtzCP0PolyT` with `t=-1` (+n-Undecane); (3) a new `PE_general` ideal-gas term (kernel code 9) for the `a·ln(c + d·exp(-b·τ))` generalized Planck-Einstein form (+Air).
+
+**Caloric bugfix in v0.9.2**: the `IdealGasHelmholtzCP0PolyT` conversion prior to v0.9.2 interpreted the `c_k` coefficients as being in a `(T/T_c)^{t_k}` polynomial, but CoolProp's convention is `cp⁰/R = Σ c_k · T^{t_k}` with **raw T in Kelvin**. This made caloric properties (cp, cv, entropy, enthalpy) under-predict for every fluid using CP0PolyT with a non-trivial polynomial — HFE143m's cp at 400K was 20.7 J/(mol·K) when it should be ~109, and several biodiesel methyl esters and n-Undecane were similarly affected. Pressure was unaffected because α⁰ does not contribute to pressure, which is why existing pressure-based spot-checks did not catch it. v0.9.2 fixes the formula and v0.9.3 extends the caloric spot-check suite (now 9 fluids) to `run_coolprop_fluids_tests.py` as a regression guard against this class of silent α⁰ bug.
+
+**Bugfix in v0.9.2**: the `IdealGasHelmholtzPlanckEinsteinGeneralized` converter had a long-standing sign error — it passed CoolProp's raw `t` value as stateprop's PE `b` coefficient, but CoolProp's convention uses `exp(+t·τ)` while stateprop's kernel uses `exp(-b·τ)`. The bug was latent because no previously-converting fluid exercised this path; Air and Fluorine (which do) would have had NaN α⁰ values. Fixed to emit `b = -t`.
+
+**Quality note**: the CoolProp version of CO₂ in the new bundle includes the 3 non-analytic critical-enhancement terms that the original `stateprop/fluids/carbondioxide.json` omits — so for near-critical CO₂ work, prefer `coolprop/carbondioxide.json`. Away from the critical region the two agree to ~1e-9.
+
+### GERG-2008 component set (21 fluids, for natural-gas mixtures)
+
+Loaded as `gerg2008/<key>` (e.g., `load_fluid("gerg2008/methane")`). Source:
+Kunz & Wagner, *J. Chem. Eng. Data* **57**, 3032 (2012), Tables A1–A5.
+The simplified GERG-2008 pure-component EOS is less accurate for individual
+fluids than the dedicated reference equations above, but is consistent with
+the GERG-2008 mixture model.
+
+| Group               | Components                                                      |
+| ------------------- | --------------------------------------------------------------- |
+| Light alkanes       | `methane`, `ethane`, `propane`                                  |
+| Heavier n-alkanes   | `nbutane`, `npentane`, `nhexane`, `nheptane`, `noctane`, `nnonane`, `ndecane` |
+| Branched alkanes    | `isobutane`, `isopentane`                                       |
+| Inerts / acid gases | `nitrogen`, `carbondioxide`, `hydrogensulfide`, `water`, `oxygen`, `carbonmonoxide` |
+| Light gases         | `hydrogen`, `helium`, `argon`                                   |
+
+Binary parameters for all 210 pairs (15 with departure functions) are
+packaged at `fluids/binaries/gerg2008.json` and loaded automatically when
+constructing a mixture with `binary_set="gerg2008"`:
+
+```python
+from stateprop.mixture.mixture import load_mixture
+
+mix = load_mixture(
+    component_names=["gerg2008/methane", "gerg2008/ethane",
+                     "gerg2008/propane", "gerg2008/nitrogen",
+                     "gerg2008/carbondioxide"],
+    composition=[0.85, 0.05, 0.02, 0.05, 0.03],
+    binary_set="gerg2008",
+)
+```
 
 ## Adding a fluid
 
@@ -220,6 +430,55 @@ Supported ideal-term `type` values:
 The `PE_cosh`/`PE_sinh` forms appear in GERG-2008 and several recent
 multiparameter EOS.
 
+### Bulk-importing fluids from CoolProp (v0.8.1)
+
+Hand-writing a JSON file for every fluid you might need is tedious;
+`tools/convert_coolprop.py` and `tools/build_fluid_library.py` automate
+ingestion from the CoolProp project's well-curated fluid library
+(<https://github.com/CoolProp/CoolProp/tree/master/dev/fluids>, ~120
+reference EOS for refrigerants, hydrocarbons, light gases, and more).
+
+The two schemas describe the same underlying mathematics
+(multiparameter Helmholtz energy); the conversion is mostly field
+renaming and array (un)flattening. Concretely:
+
+```bash
+# Get CoolProp's fluid JSONs (just the data; no compiler needed)
+git clone --depth 1 https://github.com/CoolProp/CoolProp.git /tmp/coolprop_src
+
+# Convert everything into stateprop's format, with per-fluid validation
+cd stateprop/
+python tools/build_fluid_library.py /tmp/coolprop_src/dev/fluids \
+    --output stateprop/fluids/coolprop \
+    --validate
+```
+
+After this, fluids ingested from CoolProp are accessible to stateprop's
+loader exactly like the bundled ones, e.g.
+`Fluid.from_json("stateprop/fluids/coolprop/r134a.json")`.
+
+The converter handles all common CoolProp term types (Lead, LogTau,
+Power, PlanckEinstein in both reduced-tau and Kelvin-theta forms,
+PlanckEinsteinGeneralized for cosh/sinh subsets, ResidualHelmholtzPower
+which it splits into stateprop's separate polynomial/exponential lists,
+ResidualHelmholtzGaussian, ResidualHelmholtzNonAnalytic). Fluids using
+specialty forms not yet supported (`IdealGasHelmholtzCP0PolyT`,
+`ResidualHelmholtzAssociating`, etc.) raise `UnsupportedTermType` and
+the orchestrator skips them, listing each in a manifest.
+
+The converter is **mathematically exact** — round-trip tests on
+stateprop's bundled CO₂ and water fluids show bit-for-bit identical
+pressures (rel error 0.00e+00) across 12 state points spanning gas,
+liquid, and supercritical regions. The per-fluid `--validate` flag
+additionally checks the ideal-gas limit and mechanical stability for
+each ingested fluid.
+
+**Citation discipline.** Each converted fluid preserves the BibTeX key
+of the original publication in its `reference` field. Stateprop is MIT
+licensed; the fluid coefficients themselves come from primary literature
+(Span, Wagner, Lemmon, Bell, etc.), which should be cited in any
+publication using their data. CoolProp does the same.
+
 ## Performance
 
 On a modern laptop (CO2, 39 residual terms + 8 ideal terms) with Numba:
@@ -238,13 +497,24 @@ Running `python examples/benchmark.py` prints a timing table.
 ## Tests
 
 ```bash
-python tests/test_co2.py      # core kernel + properties + saturation for CO2
-python tests/test_fluids.py   # nitrogen + synthetic cosh/sinh coverage
-python tests/test_water.py    # IAPWS-95 Tables 6, 7, 8 verification
-python tests/test_flash.py    # PT/PH/PS/TH/TS/TV/UV flashes + phase envelope
+python tests/run_cubic_tests.py                   # 173 tests: PR/SRK/RK/vdW + α-variants + flash + envelope
+python tests/run_mixture_tests.py                 # 107 tests: Helmholtz mixture + reducing/departure + flash
+python tests/run_gerg_tests.py                    #  49 tests: GERG-2008 integration (load + 5-comp NG mix)
+python tests/run_gerg_validation.py               #  52 tests: GERG-2008 numerical validation (pressure)
+python tests/run_gerg_caloric_validation.py       #  74 tests: GERG-2008 caloric (h,s,cp,cv,w) validation
+python tests/run_uv_flash_tests.py                #  45 tests: TV/UV flash for Helmholtz + cubic mixtures
+python tests/run_chemicals_interface_tests.py     #  61 tests: chemicals interface + fallback table (v0.8.0)
+python tests/run_chemdb_tests.py                  #  10 tests: stateprop.chemdb thin-shim smoke tests
+python tests/run_converter_tests.py               #  25 tests: CoolProp -> stateprop JSON converter (v0.8.1)
+python tests/run_coolprop_fluids_tests.py         #  29 tests: 125 bundled CoolProp fluids (v0.9.3)
 ```
 
-All four test files end with `OVERALL: ALL TESTS PASSED` on current master.
+All ten test files report `RESULT: N passed, 0 failed` on current master
+(628 tests total; 8 of the chemdb tests skip cleanly when the optional
+`chemicals` package is not installed -- they cover paths that require the
+~26,000-chemical databank. The other 61 chemicals-interface tests run
+against stateprop's built-in fallback table and pass with or without
+`chemicals` installed).
 
 ## Numerical validation
 
@@ -254,6 +524,41 @@ All four test files end with `OVERALL: ALL TESTS PASSED` on current master.
 - CO2 supercritical speed of sound at (T=750 K, ρ=6367 mol/m³) = 485.1 m/s,
   matching published values.
 - CO2 saturation pressure at T=240 K = 1.282 MPa, matches NIST to within 0.1%.
+- **Thermodynamic consistency** (v0.6.3): Mayer relation (cp − cv = T·(∂p/∂T)²/(ρ²·∂p/∂ρ))
+  and the sound-speed identity (w²·M = (cp/cv)·∂p/∂ρ) hold to ~1e-11 relative
+  for all six GERG-2008 components spot-checked — confirms kernel derivatives
+  are internally consistent.
+- **GERG-2008 pressure cross-validation** (v0.6.1): pressures from the
+  GERG-2008 simplified pure-fluid EOS for nitrogen, water, and CO2 agree
+  with the dedicated Span 2000 / IAPWS-95 / Span 1996 reference equations
+  to better than 0.05% at low-to-moderate density, with the documented
+  GERG-2008 accuracy degradation in dense-liquid regions (a few percent
+  for CO2 at 15,000 mol/m³, where the simplified 22-term form deviates
+  from the 39-term Span 1996 form including non-analytic critical
+  enhancement).
+- **GERG-2008 caloric cross-validation** (v0.6.3):
+  - Nitrogen cp and w match NIST Webbook to **0.04–0.36%** across 200–500 K at 1 atm
+  - GERG-2008 vs Span 2000 nitrogen cp/cv/w agree to **0.01–0.26%** at 6 (T,ρ) points
+  - GERG-2008 vs IAPWS-95 water cp/cv/w agree to **0.01–1.6%** at 3 supercritical states
+  - GERG-2008 vs Span 1996 CO2 cp/w agree to **essentially machine precision** at moderate density
+  - Water Δh over a 200 K isobaric integration (500→700 K at 1 MPa): GERG matches
+    IAPWS to 1.24%
+- **Methane density at NTP** from GERG-2008 = 0.6681 kg/m³, matches NIST
+  Webbook (0.6680 kg/m³) to 4 significant figures.
+- **Single-component mixture round-trip**: a "mixture" of composition [1.0]
+  produces pressure values equal to direct pure-fluid evaluation to
+  machine precision, confirming the mixture reduction code path collapses
+  correctly to the pure-fluid limit.
+
+### Data bug fixed in v0.6.3
+
+The packaged Span et al. 2000 nitrogen EOS (`stateprop/fluids/nitrogen.json`)
+originally had incorrect **negative** exponents in its ideal-gas polynomial,
+yielding cv⁰ = 15.37 J/(mol K) at 300 K (correct value ~20.78) and unphysical
+**negative** cv above 400 K. The exponents have been flipped to their correct
+positive values; Span N2 cp at 300 K is now 29.17 J/(mol K), matching NIST to
+0.16%. The caloric validation test suite now serves as a regression check
+against reintroduction.
 - Nitrogen saturation matches NIST to within 1–2% across 70–110 K.
 
 ## Mixtures (v0.3)
@@ -354,9 +659,67 @@ Load via `load_mixture([...], binary_set='<filename-without-.json>')`.
   × 210 binary pairs. The framework loads whatever JSON files are provided;
   the shipped `test_co2_n2.json` has *synthetic* coefficients for testing
   only. Production use requires loading published GERG-2008 tables.
-- **Population of components:** only CO2, N2, and water (reusing the pure
-  JSONs) are wired up. Methane, ethane, propane, etc. need JSON files added
-  to `fluids/components/` (same format as pure fluids).
+- **Activity-coefficient models for non-GERG mixtures.** The mixture path
+  uses simple Lorentz-Berthelot-style mixing rules unless explicit binary
+  departure functions are loaded; strongly non-ideal systems (e.g.
+  ethanol-water, methanol-benzene) without binary parameters will give
+  qualitatively-correct phase splits but quantitatively-approximate
+  compositions. NRTL/UNIQUAC/UNIFAC integration is a planned addition.
+
+### Arbitrary-component flash (v0.9.4)
+
+`load_mixture` accepts any combination of bundled fluids by name, and
+`flash_pt` does isothermal-isobaric flash with Michelsen TPD stability
+analysis on the result. This works for arbitrary CoolProp + GERG components,
+not just GERG-2008-paired natural-gas mixtures:
+
+```python
+from stateprop.mixture import load_mixture, flash_pt
+
+# Mix any of the 146 bundled fluids (125 CoolProp + 21 GERG, plus the 3
+# original hand-coded). Composition is a mole-fraction vector.
+mx = load_mixture(['ethanol', 'water'], [0.5, 0.5])
+
+# Flash returns phase classification, vapor fraction, and per-phase
+# compositions and densities. The stability test runs first to detect
+# whether the feed will split.
+r = flash_pt(p=0.5e5, T=350.0, z=mx.x, mixture=mx)
+print(r.phase)         # 'two_phase'
+print(r.beta)          # ~0.43 (vapor mole fraction)
+print(r.x, r.y)        # liquid and vapor compositions
+print(r.rho_L, r.rho_V) # phase densities
+```
+
+Behavior across the (T, p) plane:
+- Subcritical two-phase region: returns `phase='two_phase'` with non-trivial
+  β, x, y; fugacity equality `f_L = f_V` holds at converged solution
+- Compressed liquid (above bubble): returns `phase='liquid'`, β=None
+- Superheated vapor: `phase='vapor'`, β=None
+- Above all critical temperatures: `phase='supercritical'`, β=None
+
+**Numerical robustness fixes in v0.9.4** that made arbitrary-component
+flash work on the full bundled-fluid set:
+1. `load_fluid` now searches `fluids/coolprop/` and `fluids/gerg2008/`
+   subdirectories, not just the top-level. Without this, `load_mixture`
+   couldn't find any of the 146 bundled fluids by name.
+2. `density_from_pressure` now detects stalled Newton iterations: at low
+   pressures, the standard `tol*p` convergence threshold (5 µPa at 50 kPa
+   with `tol=1e-10`) falls below the float64 noise floor of the EOS pressure
+   evaluation, causing Newton to oscillate forever between two adjacent
+   float values. The detector accepts the solution when `|drho/rho| < 1e-13`
+   AND `|dp| < 1 Pa` (i.e., further iteration cannot improve precision).
+3. `flash_pt` and `stability_test_TPD` no longer raise when one density
+   branch fails to converge. At conditions far from any phase boundary
+   (e.g. compressed liquid), the opposite branch may not exist physically
+   and Newton legitimately fails. The single-phase fallback now uses
+   whichever branch did converge.
+4. Acentric factors are now extracted from CoolProp source EOS data into
+   stateprop fluid JSONs and read into a `Fluid.acentric_factor` attribute.
+   This is required for Wilson K-factor initialization; without it,
+   Rachford-Rice often returned trivial solutions and flash converged
+   spuriously to single-phase.
+5. `flash_pt` no longer recurses infinitely on trivial successive-substitution
+   results; falls through to single-phase evaluation instead.
 
 ### Known limitations on the bubble/dew solvers
 
@@ -370,17 +733,21 @@ trivial-solution artifact at unphysical T or p.
 
 Run the full test battery:
 ```
-python tests/run_mixture_tests.py      # mixture suite (107 checks)
+python tests/run_mixture_tests.py      # mixture suite (117 checks)
 python -m tests.test_co2               # pure CO2
 python -m tests.test_water             # IAPWS-95 water
 python -m tests.test_fluids            # cross-fluid consistency
 python -m tests.test_flash             # pure-component flash
 ```
 
-All 107 mixture tests + all pre-existing pure-component tests pass. The
+All 117 mixture tests + all pre-existing pure-component tests pass. The
 mixture suite includes FD validation of all 5 derivatives of the departure
-function, FD validation of the full `ln_phi` with departure active, and a
-full-circuit PT flash with fugacity equality.
+function, FD validation of the full `ln_phi` with departure active, a
+full-circuit PT flash with fugacity equality on a GERG mixture, and three
+arbitrary-component-flash regression tests on ethanol+water (a strongly
+non-ideal CoolProp pair) covering the two-phase split, single-phase
+branches at high and supercritical conditions, and the `density_from_pressure`
+robustness against float64 noise at low pressures.
 
 ## Cubic EOS (v0.4)
 
@@ -397,10 +764,176 @@ EOSes give ~0.01% accuracy but need tabulated coefficients per fluid.
 | van der Waals | 0 | 0 | 27/64 | 1/8 | 0.375 | 1 |
 | Redlich–Kwong | 0 | 1 | 0.42748 | 0.08664 | 1/3 | 1/√T_r |
 | Soave–Redlich–Kwong | 0 | 1 | 0.42748 | 0.08664 | 1/3 | `[1+m(1-√T_r)]²` |
-| Peng–Robinson | 1−√2 | 1+√2 | 0.45724 | 0.07780 | 0.307 | `[1+m(1-√T_r)]²` |
+| Peng–Robinson (1976) | 1−√2 | 1+√2 | 0.45724 | 0.07780 | 0.307 | `[1+m(1-√T_r)]²` |
+| Peng–Robinson (1978) | 1−√2 | 1+√2 | 0.45724 | 0.07780 | 0.307 | `[1+m(1-√T_r)]²` |
 
-Soave-type α: `m = a₀ + a₁ω + a₂ω²` with `(a₀, a₁, a₂) = (0.480, 1.574, -0.176)` for
-SRK and `(0.37464, 1.54226, -0.26992)` for PR.
+Soave-type m(ω) polynomials:
+- **SRK**: `m = 0.480 + 1.574 ω - 0.176 ω²`
+- **PR-1976**: `m = 0.37464 + 1.54226 ω - 0.26992 ω²`
+- **PR-1978**: `m = 0.379642 + 1.48503 ω - 0.164423 ω² + 0.016666 ω³`
+
+### PR-1976 vs PR-1978
+
+The `PR(...)` factory auto-dispatches to PR-1978 for components with
+ω > 0.49 (matching industrial convention). The 1978 correlation has an
+added cubic term and is tuned to give better vapor pressures for heavy
+n-alkanes, where PR-1976 systematically overpredicts.
+
+Validation against NIST Antoine data at the midpoint of each compound's
+Antoine-fit temperature range:
+
+| Compound | ω | PR-1976 err | PR-1978 err |
+|----------|---|-------------|-------------|
+| n-decane (C10) | 0.492 | +0.8% | −0.3% |
+| n-dodecane (C12) | 0.562 | +5.6% | +3.7% |
+| n-hexadecane (C16) | 0.717 | +7.9% | +3.1% |
+
+Light components (ω < 0.49) are unchanged — `PR(...)` with CO2 (ω=0.22),
+methane (ω=0.01), etc. gives identical results regardless of whether
+`use_pr78` is `"auto"`, `"never"`, or absent.
+
+Explicit control:
+
+```python
+from stateprop.cubic import PR, PR78
+
+# Default: auto-dispatch based on omega
+decane = PR(T_c=617.7, p_c=21.1e5, acentric_factor=0.4923)
+# -> uses PR-1978 because 0.49 < omega
+
+# Force PR-1976 (legacy behavior)
+decane_76 = PR(T_c=617.7, p_c=21.1e5, acentric_factor=0.4923, use_pr78="never")
+
+# Force PR-1978 for any omega (e.g., for consistency across a mixture)
+co2_78 = PR(T_c=304.13, p_c=7.377e6, acentric_factor=0.224, use_pr78="always")
+
+# Explicit PR-1978 factory (always uses the 1978 polynomial)
+decane_78 = PR78(T_c=617.7, p_c=21.1e5, acentric_factor=0.4923)
+```
+
+### Alpha-function variants (MC, Twu, PRSV)
+
+Beyond the classical Soave form, three additional α-functions are available
+via `alpha_override` (or convenience factories). Each is useful for a
+different class of fluids:
+
+**Mathias-Copeman (1983)** — three-parameter polynomial in `(1-√T_r)`,
+piecewise cubic below T_c and quadratic above. Good for polar fluids.
+
+```python
+from stateprop.cubic import PR_MC
+# c1=None defaults to the family's m(omega); c2, c3 are small corrections
+water = PR_MC(T_c=647.1, p_c=22.06e6,
+              c1=None, c2=-0.1708, c3=0.4066,
+              acentric_factor=0.344)
+```
+
+**Twu-Coon-Cunningham (1995)** — power-law form `α = T_r^{N(M-1)} exp[L(1 - T_r^{NM})]`.
+Does not use `acentric_factor`. Parameters `(L, M, N)` come from compound-
+specific tables. PR-Twu and SRK-Twu have different parameter sets.
+
+```python
+from stateprop.cubic import PR_Twu
+methane_pr_twu = PR_Twu(T_c=190.56, p_c=4.599e6, L=0.1243, M=0.8916, N=2.0)
+```
+
+**Stryjek-Vera PRSV (1986)** — modified PR with a T-dependent `κ(T_r)`:
+
+$$\kappa(T_r) = \kappa_0(\omega) + \kappa_1(1+\sqrt{T_r})(0.7 - T_r)$$
+
+where `κ₀(ω)` is a refined PR-style polynomial and `κ₁` is the one
+component-specific tuning parameter (tabulated in Stryjek-Vera for ~90
+fluids; `κ₁=0` recovers a slightly improved non-polar PR).
+
+```python
+from stateprop.cubic import PRSV
+water = PRSV(T_c=647.096, p_c=22.064e6, acentric_factor=0.344, kappa1=-0.06635)
+```
+
+**PRSV improvement for water:**
+
+| T [K] | NIST [MPa] | PR err | PRSV err |
+|-------|-----------:|-------:|---------:|
+| 400 | 0.2457 | 2.81% | 0.03% |
+| 500 | 2.6393 | 0.91% | 0.08% |
+| 600 | 12.345 | 1.41% | 0.64% |
+
+**Low-level access** via `alpha_override` (a tuple that replaces the family
+default):
+
+```python
+from stateprop.cubic import CubicEOS
+# Any of these:
+eos = CubicEOS(T_c, p_c, family='pr', alpha_override=('mathias_copeman', c1, c2, c3))
+eos = CubicEOS(T_c, p_c, family='pr', alpha_override=('twu', L, M, N))
+eos = CubicEOS(T_c, p_c, family='pr', alpha_override=('prsv', kappa1), acentric_factor=omega)
+```
+
+Components using different α-functions can be freely combined in the same
+`CubicMixture` as long as they share the same `(ε, σ, Ωₐ, Ω_b)` — i.e., all
+PR-family or all SRK-family. The α-function only affects each component's
+`a_i(T)`; mixing rules operate downstream.
+
+### Volume translation (Péneloux-style)
+
+Classical cubics give systematically poor *liquid* densities — SRK
+under-predicts by ~10%, PR over-predicts by a few percent — while giving
+accurate vapor densities and phase equilibria. Péneloux et al. (1982)
+showed that an additive constant shift in molar volume
+
+$$v_\text{real} = v_\text{cubic} - c$$
+
+corrects liquid densities **without affecting vapor pressure, K-factors,
+or any other phase-equilibrium quantity**. The shift adds a simple
+Péneloux correction to each component's fugacity coefficient:
+
+$$\ln\hat\varphi_i^\text{translated} = \ln\hat\varphi_i^\text{cubic} + \frac{c_i\, p}{RT}$$
+
+which cancels exactly in the fugacity-equality condition defining phase
+equilibrium.
+
+**Usage:**
+
+```python
+from stateprop.cubic import SRK, CubicMixture
+
+# Auto-compute c from Peneloux 1982 + Yamada-Gunn Z_RA (SRK only)
+hexane = SRK(T_c=507.6, p_c=30.25e5, acentric_factor=0.301,
+             volume_shift_c="peneloux")
+
+# Or pass a numeric c in m^3/mol (any EOS family)
+hexane_user = SRK(T_c=507.6, p_c=30.25e5, acentric_factor=0.301,
+                  volume_shift_c=17.2e-6)   # 17.2 cm^3/mol
+```
+
+The `"peneloux"` string is only supported for SRK because Péneloux's
+original 1982 fit is SRK-specific. For PR there is no single simple
+one-parameter auto-correlation — Jhaveri-Youngren (1988) and others
+require molecular weight and paraffinicity or use per-compound tables.
+For PR, pass a numeric `c` from literature data.
+
+**Liquid density improvement for SRK+Péneloux:**
+
+| System | T | SRK error | SRK+Péneloux error |
+|--------|---|----------:|-------------------:|
+| n-butane | 300 K | −8.5% | −1.2% |
+| n-butane | 350 K | −11.9% | −5.9% |
+| n-hexane | 298 K | −10.5% | +1.4% |
+| n-hexane | 350 K | −11.2% | −0.5% |
+
+The classic SRK under-prediction of liquid density is largely closed at
+moderate T_r; accuracy degrades near critical (T_r > 0.9) as expected for
+a constant (temperature-independent) shift.
+
+**What changes, what doesn't, under translation:**
+
+- Unchanged (exact, bit-identical): saturation pressure, K-factors, β,
+  liquid/vapor compositions in a PT flash, (ln φ_L − ln φ_V), residual
+  entropy, residual internal energy at (T, x, p).
+- Changed: molar density (the whole point), residual enthalpy (picks up a
+  `−c_mix · p` correction via `h = u + p · v_real`), individual component
+  ln φ values (picks up a `+c_i · p / RT` correction).
+- Mixing rule: `c_mix(x) = Σᵢ xᵢ cᵢ` (linear).
 
 ### Example: pure fluid
 
@@ -524,15 +1057,174 @@ at moderate subcritical conditions.
 - **State-function flashes (v0.4.1): PH, PS, TH, TS** as outer Newton-secant
   wrappers around PT flash. Round-trips recover source T or p to 1e-4 or
   better across single-phase and two-phase states
+- **Mixture critical points (v0.5.0)** via Heidemann-Khalil / Michelsen
+  formulation. See example below.
+
+### Mixture critical points
+
+The mixture critical point at a given overall composition z is found by
+solving the two Heidemann-Khalil conditions:
+
+1. The scaled Hessian of Helmholtz free energy, `B_ij = I + √(zᵢzⱼ) Aᵢⱼʳᵉˢ/(RT)`,
+   has a zero eigenvalue (spinodal).
+2. The third-order directional derivative along the null eigenvector
+   vanishes (criticality, not just limit of stability).
+
+The second derivative matrix `Aᵢⱼʳᵉˢ` is computed **fully analytically**
+from the cubic EOS — FD-validated to ~1e-8 against perturbation of
+`ln_phi + ln Z`. The third-order term is computed by directional FD of
+`uᵀB(n + s·u)u` along the null eigenvector u. Newton's method in (T, V)
+converges in 4-8 iterations from a pseudo-critical initial guess.
+
+```python
+from stateprop.cubic import PR, CubicMixture, critical_point
+
+c_CO2 = PR(304.13, 7.3773e6, 0.224)
+c_CH4 = PR(190.564, 4.5992e6, 0.01142)
+mx = CubicMixture([c_CO2, c_CH4], composition=[0.5, 0.5], k_ij={(0,1): 0.09})
+
+r = critical_point(mx.x, mx)
+print(f"T_c = {r['T_c']:.2f} K")              # ~253.5 K
+print(f"p_c = {r['p_c']/1e6:.3f} MPa")        # ~8.6 MPa
+print(f"ρ_c = {r['rho_c']:.1f} mol/m^3")
+```
+
+**Pure-fluid limit check (internal consistency):** As `z_i → 1`, the
+mixture critical point recovers the pure fluid's EOS critical point:
+
+| Component | Input Tc | Input pc | Mixture solver Tc | Mixture solver pc |
+|-----------|----------|----------|-------------------|--------------------|
+| CO2 | 304.13 K | 7.377 MPa | 304.12 K | 7.377 MPa |
+| CH4 | 190.56 K | 4.599 MPa | 190.56 K | 4.598 MPa |
+
+**CO2/CH4 critical locus (k_ij=0.09, PR-1976):**
+
+| z(CO2) | T_c [K] | p_c [MPa] |
+|--------|---------|-----------|
+| 0.10 | 197.0 | 4.46 |
+| 0.30 | 222.1 | 6.56 |
+| 0.50 | 253.5 | 8.60 |
+| 0.70 | 278.0 | 8.67 |
+| 0.90 | 296.4 | 7.89 |
+
+This is the classic Type-I continuous locus: both pure-fluid critical
+points connect through a smooth curve with a pressure maximum between
+them.
+
+Restrictions: requires `σ ≠ ε` (PR, SRK, RK; vdW not supported — raises
+`NotImplementedError`). Volume translation is ignored for the critical
+point calculation since it's invariant anyway.
+
+### Phase envelopes (v0.5.1)
+
+Two capabilities:
+
+**`envelope_point(T, p, z, mixture, beta)`** — converges a single bubble
+(`beta=0`) or dew (`beta=1`) point via Wilson-seeded Newton. Works
+wherever classical bubble/dew-point solvers work and matches them to
+~1e-6 rel err. Useful for pointwise VLE calculations without iterating.
+
+```python
+from stateprop.cubic import PR, CubicMixture, envelope_point
+c_CO2 = PR(304.13, 7.3773e6, 0.224)
+c_CH4 = PR(190.564, 4.5992e6, 0.01142)
+mx = CubicMixture([c_CO2, c_CH4], composition=[0.5, 0.5], k_ij={(0,1): 0.09})
+
+# Bubble point at 200 K
+r = envelope_point(T=200, p=1e6, z=mx.x, mixture=mx, beta=0)
+print(f"Bubble at T=200 K: p={r['p']/1e6:.4f} MPa, K={r['K']}")
+```
+
+**`trace_envelope(z, mixture)`** — traces the full phase envelope by
+seeding at the mixture critical point (using the v0.5.0 critical-point
+solver's null eigenvector) and stepping outward in both directions. This
+sidesteps the critical-point turning-point problem that low-p-seeded
+continuation runs into.
+
+v0.5.2 adds three robustness improvements:
+- **Adaptive β-switching** with hysteresis based on z-weighted ln K
+  asymmetry, picking the numerically better-conditioned Rachford-Rice
+  formulation (bubble vs dew) at each point without chattering near
+  the critical.
+- **Quadratic predictor** (Lagrange extrapolation through last 3 points)
+  when the extrapolation is within the span of history, falling back to
+  linear tangent predictor otherwise.
+- **Multi-strategy seed fallback**: if the eigenvector-perturbed seed
+  fails to converge, progressively halve the perturbation; if all fail,
+  use a Wilson K-factor seed at a point slightly off the critical.
+
+```python
+from stateprop.cubic import trace_envelope
+
+env = trace_envelope(mx.x, mx)
+# env['T'], env['p']: arrays along the envelope
+# env['K']: K-factors at each point
+# env['branch']: 0 for bubble (z=liquid), 1 for dew (z=vapor), -1 for critical
+# env['critical']: dict from critical_point()
+```
+
+Quality survey across 7 binary systems (CO2/CH4, CH4/N2, CH4/C2H6 at
+various compositions and k_ij values):
+
+| System | v0.5.1 points / spurious | v0.5.2 points / spurious |
+|--------|--------------------------|--------------------------|
+| CO2/CH4 30-70 | 62 / 0 | 98 / 0 |
+| CO2/CH4 50-50 | 58 / 6 | 53 / 0 |
+| CO2/CH4 70-30 | 1 / 0 | 4 / 0 |
+| CH4/N2 80-20 | 1 / 0 | 16 / 0 |
+| CH4/N2 50-50 | 1 / 0 | 13 / 0 |
+| CH4/C2H6 50-50 | 1 / 0 | 35 / 0 |
+| CH4/C2H6 80-20 | 55 / 0 | 55 / 0 |
+
+Every point on the traced envelope satisfies `Σ(K·z) = 1` (bubble label)
+or `Σ(z/K) = 1` (dew label) to better than 1e-9. No spurious points in
+any tested system at v0.5.2.
+
+### Performance (v0.4.5)
+
+The cubic mixture hot paths are vectorized using numpy broadcasting.
+The O(N²) double-sum in `a_b_mix` uses `np.outer` and matrix multiply
+instead of Python loops; `ln_phi` is fully array-vectorized; and the cubic
+polynomial solver uses an analytic Cardano/trigonometric formula instead of
+`np.roots` (11× faster on realistic EOS coefficients). Volume-translation
+paths have fast-path bypasses when no component has a nonzero shift.
+
+Benchmarks on a 4-component PR natural-gas mixture (CH₄/C₂H₆/C₃H₈/N₂):
+
+| Primitive | v0.4.4 | v0.4.5 | Speedup |
+|-----------|--------|--------|---------|
+| `a_b_mix` | 47 μs | 12 μs | 3.8× |
+| `ln_phi` | 33 μs | 22 μs | 1.5× |
+| `density_from_pressure` | 61 μs | 29 μs | 2.1× |
+| `flash_pt` | 8.4 ms | 5.1 ms | 1.6× |
+
+The 8-component mixture scales well: `a_b_mix` = 18 μs, `ln_phi` = 27 μs,
+`density_from_pressure` = 36 μs. No dependency beyond numpy.
 
 ### What's not (yet)
 
-- **Volume translation** (e.g., Peneloux-type). Would improve liquid density
-  accuracy at the cost of framework complexity.
-- **α-function variants** beyond classical Soave (e.g., Twu-Coon, Mathias-Copeman).
-  Adding these requires a modest extension to `CubicEOS.alpha_func`.
-- **PR-1978** modified m(ω) correlation for heavier acentric factors. The
-  classical (1976) form is used throughout.
+Nothing fundamental remains on the cubic path beyond per-compound tuning
+parameters (Jhaveri-Youngren shifts for PR, PRSV κ₁ values for polar
+fluids, Twu L/M/N coefficients). These are data inputs, not code.
+
+Phase envelope tracing (v0.5.2) is now robust across all 7 tested binary
+systems with zero spurious points. The remaining imperfection is the
+tracer sometimes terminating early (stuck at a fixed step) on the
+dew-side of symmetric binaries where K-factors stay very close to 1
+throughout the envelope. Not a correctness issue -- every recorded
+point is valid to 1e-9 -- just a coverage limitation.
+
+Cross-cutting items that would be nice but are not blocking:
+- **Pre-populated GERG-2008 binary parameters** for natural-gas systems
+  (the framework is built and validated; populating the 21-component
+  database is pure data entry).
+- **Numba JIT acceleration** — the hot paths are already vectorized in
+  numpy; Numba `@njit` on the analytic cubic solver and the array
+  kernels would give another ~3-5× on top of the current speedup.
+- **Refactoring cubic and Helmholtz flash suites to share code** via an
+  EOS protocol (eliminates ~600 lines of parallel implementation).
+- **Linked Helmholtz ideal-gas model for cubics** (use a Helmholtz fluid's
+  α⁰ instead of a Cp polynomial for higher accuracy).
 
 ### Run the cubic tests
 
@@ -540,13 +1232,20 @@ at moderate subcritical conditions.
 python tests/run_cubic_tests.py
 ```
 
-All 59 cubic tests pass: 4 pure-component α^r FD checks, 2 pressure-
+All 173 cubic tests pass: 4 pure-component α^r FD checks, 2 pressure-
 consistency checks, SRK & PR saturation vs NIST for CO2, mixture
 pressure-consistency (4 states), binary ln φ FD (9 states), ternary ln φ FD,
 PT flash with fugacity equality (binary + ternary), supercritical detection,
 stability test, 11 bubble/dew point convergence checks, 3 caloric FD checks,
-Cp recovery check, flash_pt h/s population, and 14 state-function flash
-round-trips (PH, PS, TH, TS across multiple phase regimes).
+Cp recovery check, flash_pt h/s population, 14 state-function flash
+round-trips (PH, PS, TH, TS across multiple phase regimes), 26 PR-1978
+checks, 4 α-variant FD checks, 6 Mathias-Copeman→Soave reduction tests,
+3 PRSV-vs-water accuracy improvements, 3 Twu pressure-consistency checks,
+a mixed-α-function mixture flash, 5 alpha_override validation checks,
+14 Péneloux volume-translation checks, 18 critical-point checks, and 14
+envelope-tracing checks (envelope_point matches bubble_point_p at 4 T's,
+trace_envelope starts at critical with both branches, all bubble-side
+points satisfy Rachford-Rice to 1e-9).
 
 ## References
 
@@ -561,6 +1260,25 @@ round-trips (PH, PS, TH, TS across multiple phase regimes).
   Computational Aspects*, 2nd ed. (Tie-Line, 2007) — cubic EOS algorithms.
 - G. Soave, *Chem. Eng. Sci.* **27**, 1197 (1972) — SRK α function.
 - D.-Y. Peng and D. B. Robinson, *Ind. Eng. Chem. Fund.* **15**, 59 (1976).
+- D.-Y. Peng and D. B. Robinson, GPA Research Report RR-28 (1978) — PR-1978
+  m(ω) correlation for heavy fractions.
+- P. M. Mathias and T. W. Copeman, *Fluid Phase Equil.* **13**, 91 (1983)
+  — Mathias-Copeman α function.
+- R. Stryjek and J. H. Vera, *Can. J. Chem. Eng.* **64**, 323 (1986)
+  — PRSV α function with κ₁ tables for ~90 fluids.
+- C. H. Twu, J. E. Coon, and J. R. Cunningham, *Fluid Phase Equil.* **105**,
+  49 (1995) — Twu-Coon-Cunningham α function for PR.
+- A. Péneloux, E. Rauzy, and R. Fréze, *Fluid Phase Equil.* **8**, 7 (1982)
+  — original volume translation for SRK.
+- B. S. Jhaveri and G. K. Youngren, *SPE Reservoir Engineering* **3**, 1033
+  (1988) — volume translation for PR.
+- R. A. Heidemann and A. M. Khalil, *AIChE J.* **26**, 769 (1980) —
+  critical-point conditions for cubic EOS mixtures.
+- M. L. Michelsen and R. A. Heidemann, *AIChE J.* **27**, 521 (1981) —
+  scaled-B formulation of the critical-point problem.
+- M. L. Michelsen & J. M. Mollerup, *Thermodynamic Models: Fundamentals
+  and Computational Aspects*, 2nd ed., 2007 — comprehensive reference for
+  EOS-based phase equilibrium calculations.
 
 ## License
 
