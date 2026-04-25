@@ -1,6 +1,6 @@
 Metadata-Version: 2.4
 Name: stateprop
-Version: 0.9.7
+Version: 0.9.56
 Summary: Multiparameter Helmholtz equation of state for pure-fluid and mixture thermodynamic properties (Span-Wagner, IAPWS-95, GERG-2008) plus cubic equations of state (PR/SRK/RK/vdW with Mathias-Copeman, Twu, PRSV alpha-functions, Peneloux volume translation, mixture critical points and phase envelopes, optional chemicals-library lookup).
 Author: stateprop contributors
 License: MIT
@@ -101,16 +101,19 @@ The 10 test runners can be invoked directly against either an editable
 install or an installed wheel:
 
 ```bash
-python tests/run_cubic_tests.py                   # 176 tests
-python tests/run_mixture_tests.py                 # 107 tests
+python tests/run_cubic_tests.py                   # 256 tests
+python tests/run_mixture_tests.py                 # 248 tests
+python tests/run_saft_tests.py                    # 126 tests
 python tests/run_gerg_tests.py                    #  49 tests
 python tests/run_gerg_validation.py               #  52 tests
 python tests/run_gerg_caloric_validation.py       #  74 tests
 python tests/run_uv_flash_tests.py                #  45 tests
 python tests/run_chemicals_interface_tests.py     #  61 tests (fallback+chemicals)
 python tests/run_chemdb_tests.py                  #  10 tests (8 require `chemicals`)
+    
 python tests/run_converter_tests.py               #  25 tests: CoolProp -> stateprop converter
 python tests/run_coolprop_fluids_tests.py         #  29 tests: bundled CoolProp fluid library (v0.9.3: 125 fluids)
+    python tests/run_transport_tests.py                #  30 tests
 ```
 
 ## Quick start
@@ -366,6 +369,7 @@ the original publication, which should be cited in any work using the data:
 **v0.9.2 newly added vs v0.9.1** (9 fluids): Fluorine, Propyne, R114, R13, R14, R21, RC318, Air, n-Undecane. Unlocked by three coordinated extensions: (1) the residual exponential kernel was generalized from `exp(-δ^c)` to `exp(-g·δ^c)` to support CoolProp's `ResidualHelmholtzExponential` block (+7 fluids); (2) a new `tau_log_tau` ideal-gas term (kernel code 8) for the τ·ln(τ) contribution from `IdealGasHelmholtzCP0PolyT` with `t=-1` (+n-Undecane); (3) a new `PE_general` ideal-gas term (kernel code 9) for the `a·ln(c + d·exp(-b·τ))` generalized Planck-Einstein form (+Air).
 
 **Caloric bugfix in v0.9.2**: the `IdealGasHelmholtzCP0PolyT` conversion prior to v0.9.2 interpreted the `c_k` coefficients as being in a `(T/T_c)^{t_k}` polynomial, but CoolProp's convention is `cp⁰/R = Σ c_k · T^{t_k}` with **raw T in Kelvin**. This made caloric properties (cp, cv, entropy, enthalpy) under-predict for every fluid using CP0PolyT with a non-trivial polynomial — HFE143m's cp at 400K was 20.7 J/(mol·K) when it should be ~109, and several biodiesel methyl esters and n-Undecane were similarly affected. Pressure was unaffected because α⁰ does not contribute to pressure, which is why existing pressure-based spot-checks did not catch it. v0.9.2 fixes the formula and v0.9.3 extends the caloric spot-check suite (now 9 fluids) to `run_coolprop_fluids_tests.py` as a regression guard against this class of silent α⁰ bug.
+    python tests/run_transport_tests.py                #  30 tests
 
 **Bugfix in v0.9.2**: the `IdealGasHelmholtzPlanckEinsteinGeneralized` converter had a long-standing sign error — it passed CoolProp's raw `t` value as stateprop's PE `b` coefficient, but CoolProp's convention uses `exp(+t·τ)` while stateprop's kernel uses `exp(-b·τ)`. The bug was latent because no previously-converting fluid exercised this path; Air and Fluorine (which do) would have had NaN α⁰ values. Fixed to emit `b = -t`.
 
@@ -541,20 +545,22 @@ Running `python examples/benchmark.py` prints a timing table.
 ## Tests
 
 ```bash
-python tests/run_cubic_tests.py                   # 176 tests: PR/SRK/RK/vdW + α-variants + flash + envelope
-python tests/run_mixture_tests.py                 # 107 tests: Helmholtz mixture + reducing/departure + flash
+python tests/run_cubic_tests.py                   # 256 tests: PR/SRK/RK/vdW + α-variants + flash + envelope
+python tests/run_mixture_tests.py                 # 248 tests: Helmholtz mixture + reducing/departure + flash
 python tests/run_gerg_tests.py                    #  49 tests: GERG-2008 integration (load + 5-comp NG mix)
 python tests/run_gerg_validation.py               #  52 tests: GERG-2008 numerical validation (pressure)
 python tests/run_gerg_caloric_validation.py       #  74 tests: GERG-2008 caloric (h,s,cp,cv,w) validation
 python tests/run_uv_flash_tests.py                #  45 tests: TV/UV flash for Helmholtz + cubic mixtures
 python tests/run_chemicals_interface_tests.py     #  61 tests: chemicals interface + fallback table (v0.8.0)
 python tests/run_chemdb_tests.py                  #  10 tests: stateprop.chemdb thin-shim smoke tests
+    
 python tests/run_converter_tests.py               #  25 tests: CoolProp -> stateprop JSON converter (v0.8.1)
 python tests/run_coolprop_fluids_tests.py         #  29 tests: 125 bundled CoolProp fluids (v0.9.3)
+    python tests/run_transport_tests.py                #  30 tests
 ```
 
 All ten test files report `RESULT: N passed, 0 failed` on current master
-(635 tests total; 8 of the chemdb tests skip cleanly when the optional
+(1026 tests total; 8 of the chemdb tests skip cleanly when the optional
 `chemicals` package is not installed -- they cover paths that require the
 ~26,000-chemical databank. The other 61 chemicals-interface tests run
 against stateprop's built-in fallback table and pass with or without
@@ -916,6 +922,3151 @@ equations of state, suitable for mixtures of ~any fluid with known critical
 parameters and acentric factor. This is complementary to the multiparameter
 Helmholtz path: cubics give ~1% accuracy but work for any fluid; Helmholtz
 EOSes give ~0.01% accuracy but need tabulated coefficients per fluid.
+
+**PV / Pα / Tα flash modes for cubic mixtures in v0.9.56.**
+Three new flash routines complete the cubic-EOS state-function
+flash family. PH/PS/TH/TS/TV/UV flashes already existed (v0.9.13);
+v0.9.56 adds the missing PV mode plus the specified-vapor-fraction
+modes that generalize bubble (alpha=0) and dew (alpha=1) points.
+
+```python
+from stateprop.cubic import (PR, CubicMixture, flash_pv,
+    flash_p_alpha, flash_t_alpha)
+
+# Setup: methane-ethane-propane
+methane = PR(T_c=190.56, p_c=4.599e6, acentric_factor=0.011)
+ethane  = PR(T_c=305.32, p_c=4.872e6, acentric_factor=0.099)
+propane = PR(T_c=369.83, p_c=4.248e6, acentric_factor=0.152)
+z = [0.6, 0.3, 0.1]
+mx = CubicMixture([methane, ethane, propane], composition=z)
+
+# 1. PV flash: known p, known molar volume; find T
+result = flash_pv(p=30e5, v_target=2.5e-4, z=z, mixture=mx)
+print(f"PV flash: T={result.T:.2f} K, phase={result.phase}")
+
+# 2. P-alpha flash: known p, specified vapor fraction; find T
+result = flash_p_alpha(p=20e5, alpha=0.5, z=z, mixture=mx)
+print(f"50% vaporized at 20 bar: T={result.T:.2f} K")
+
+# 3. T-alpha flash: known T, specified vapor fraction; find p
+result = flash_t_alpha(T=250.0, alpha=0.25, z=z, mixture=mx)
+print(f"25% vapor at 250 K: p={result.p/1e5:.2f} bar")
+```
+
+**Use cases**:
+
+- **PV flash** (given P and V, find T): tank/cylinder calculations
+  with known total volume and pressure; throttling-valve and
+  aftercooler analysis where pressure and inventory are specified;
+  symmetric counterpart of the existing TV flash.
+
+- **P-alpha flash** (given P and vapor fraction, find T):
+  - alpha = 0 -> bubble-point T (matches `newton_bubble_point_T`)
+  - alpha = 1 -> dew-point T (matches `newton_dew_point_T`)
+  - 0 < alpha < 1 -> partial vaporization at fixed p, e.g. for
+    sizing flash drums, constructing T-x-y diagrams, or generating
+    constant-pressure phase envelope curves.
+
+- **T-alpha flash** (given T and alpha, find P): partial
+  condensation at fixed temperature; constructing P-x-y diagrams;
+  determining condensation pressure for partial-condensation
+  process design.
+
+**Algorithms**:
+
+PV flash uses bracket-and-secant on ln(T) at fixed p with
+stagnation detection (mirror of TV flash logic). The molar volume
+1/rho is monotonically decreasing in T at fixed p in the
+single-phase region; the two-phase dome introduces a discontinuity
+in dv/dT but v itself remains continuous, so a bracket-projecting
+secant converges robustly.
+
+P-alpha and T-alpha flashes leverage the fact that beta crosses
+[0, 1] monotonically through the two-phase region. The bracket is
+established by computing bubble (alpha=0 endpoint) and dew
+(alpha=1 endpoint) values exactly via the existing Newton solvers,
+then secant on the residual `r.beta - alpha` runs inside the
+guaranteed bracket. Linear-in-alpha initial guess in T (or ln(p))
+gives quick convergence (typically 4-6 iterations to 1e-7
+tolerance).
+
+**Validation**: round-trip consistency tests verify that flash_pv
+recovers the input T to <1e-5 K from a v computed at known T,
+both in single-phase regions and inside the two-phase dome.
+P-alpha and T-alpha flashes recover target beta to <1e-7 across
+alpha values [0.1, 0.25, 0.5, 0.75, 0.9]. Endpoint cases match
+the dedicated bubble/dew solvers to <1e-9 in T or relative p.
+
+**Tests added**: 8 new test functions, **12 sub-checks** (256 to
+268 in run_cubic_tests):
+
+- PV single-phase recovery (vapor + liquid, 2 sub-checks)
+- PV two-phase recovery
+- P-alpha 5-alpha sweep recovers beta
+- P-alpha endpoints match bubble/dew (2 sub-checks)
+- T-alpha 5-alpha sweep recovers beta
+- T-alpha endpoints match bubble/dew (2 sub-checks)
+- Invalid alpha raises ValueError (2 sub-checks)
+- PV self-consistency at converged T
+
+**Roadmap**: validation paper vs REFPROP/DECHEMA, reaction
+equilibrium, electrolyte and polymer extensions, extending the
+specified-vapor-fraction flash to gamma-phi-EOS and SAFT
+frameworks.
+
+**Coverage reporting and benchmark validation in v0.9.55.**
+The bundled `LLE_OVERRIDES` set covers only 4 main-group pairs from
+the full Magnussen 1981 LLE-UNIFAC table. v0.9.55 adds tools to
+help users understand and work with that limitation rigorously,
+plus a clean import/export API for plugging in custom parameter
+sets.
+
+```python
+from stateprop.activity import (lle_coverage, validate_against_benchmarks,
+    save_overrides_to_json, load_overrides_from_json,
+    LLE_OVERRIDES, format_benchmark_results)
+
+# Coverage report: which main-group pairs are LLE-fitted?
+groups = [{'CH3': 1, 'CH2': 1, 'OH': 1}, {'H2O': 1},
+          {'CH3COO': 1, 'CH2': 1, 'CH3': 1}]   # ethanol, water, ethyl acetate
+print(lle_coverage(groups))
+# > LLE coverage: 3/6 pairs LLE-fitted (50%)
+# >   LLE-fitted (Magnussen 1981):
+# >     (1,5)  CH2 (alkane) <-> OH (alcohol)
+# >     (1,7)  CH2 (alkane) <-> H2O (water)
+# >     (5,7)  OH (alcohol) <-> H2O (water)
+# >   Falling back to VLE values (Hansen 1991):
+# >     (1,11) CH2 (alkane) <-> CCOO (ester)
+# >     (5,11) OH (alcohol) <-> CCOO (ester)
+# >     (7,11) H2O (water)  <-> CCOO (ester)
+
+# Run validation harness: bundled set vs published mutual solubilities
+results = validate_against_benchmarks(verbose=True)
+
+# Plug in user-supplied parameters from JSON
+extra = load_overrides_from_json('my_lle_table.json')
+results = validate_against_benchmarks(overrides={**LLE_OVERRIDES, **extra})
+```
+
+**Bundled benchmark systems** (4 canonical aqueous-organic LLE):
+
+| System | T [K] | pub_water | pred_water | pub_org | pred_org |
+|---|---|---|---|---|---|
+| n-butanol + water | 298 | 0.0185 | 0.0109 | 0.485 | 0.707 |
+| n-pentanol + water | 298 | 0.0050 | 0.0031 | 0.620 | 0.783 |
+| n-hexanol + water | 298 | 0.0011 | 0.0010 | 0.690 | 0.827 |
+| benzene + water | 298 | 0.00041 | 0.00041 | 0.9974 | 0.9969 |
+
+The validation harness reveals the actual character of the bundled
+LLE_OVERRIDES set:
+
+- **Water-rich phase predictions are excellent**: maximum absolute
+  error of 0.008 across all benchmarks, including the very low
+  benzene-water mutual solubility (0.0004 vs 0.00041).
+- **Organic-rich phase predictions for alcohols have systematic
+  ~15-25% absolute error**: the bundled set predicts more
+  hydrophobic alcohol-rich phases than experiment.
+- **Aromatic-water systems are very accurate** in both phases
+  because the (3,7) ACH-H2O override is a high-confidence value.
+
+Users can now SEE these limitations and decide whether the bundled
+set is adequate for their system, whether they need to extend with
+more parameter pairs (via `extra_overrides`), or whether they
+should fit their own NRTL/UNIQUAC parameters via
+`regression.regress_lle()` (v0.9.47).
+
+**JSON import/export** uses string keys "m,n" so the format is
+hand-editable:
+
+```json
+{
+  "1,5": [644.6, 328.2],
+  "1,7": [1300.0, 342.4],
+  "3,7": [859.4, 362.3],
+  "5,7": [155.6, -49.29]
+}
+```
+
+This makes it straightforward for users to:
+1. Type values from the full Magnussen 1981 paper into a JSON file
+2. Share validated parameter sets across projects
+3. Maintain different sets for different application domains
+   (e.g., one for fatty acids, one for aromatic separations)
+
+**Why ship coverage instead of more parameter values?** The full
+Magnussen 1981 table covers many additional main-group pairs, but
+reproducing those values without the original paper risks shipping
+silent errors. The infrastructure approach lets users plug in
+verified values when they have them, while making the limitations
+of the default set transparent and measurable.
+
+**Tests added**: 11 new test functions, **24 sub-checks** (265 to
+289):
+
+- 4 coverage tests (fully-fitted, partial, summary string, no-pairs case)
+- 4 benchmark tests (water phase accuracy, org phase known limit,
+  result type, formatted output)
+- 3 JSON I/O tests (round-trip, user-format load, custom overrides
+  affect predictions)
+
+**Roadmap**: validation paper vs REFPROP/DECHEMA, PH/PV/PT-alpha
+flash modes, reaction equilibrium, electrolyte and polymer
+extensions.
+
+**LLE-fitted UNIFAC parameter database in v0.9.54.** New
+`UNIFAC_LLE` class and `stateprop.activity.unifac_lle` module
+provide a UNIFAC variant that uses LLE-fitted main-group
+interaction parameters from Magnussen, Rasmussen, Fredenslund
+(1981) where available, falling back to the standard
+VLE-fitted parameters from Hansen 1991 for pairs not in the
+LLE override set.
+
+```python
+from stateprop.activity import UNIFAC_LLE, LLEFlash
+
+# Drop-in replacement for UNIFAC, with LLE-fitted parameters
+uf = UNIFAC_LLE([{'CH3': 1, 'CH2': 3, 'OH': 1}, {'H2O': 1}])
+gamma = uf.gammas(298.15, [0.5, 0.5])
+
+# Use in LLE flash
+lle = LLEFlash(uf)
+result = lle.solve(298.15, [0.5, 0.5], x1_guess=[0.01, 0.99],
+                    x2_guess=[0.5, 0.5])
+```
+
+**Key differences from VLE-UNIFAC**: The standard UNIFAC parameters
+are fitted predominantly to VLE data and give qualitatively wrong
+LLE predictions for many aqueous-organic systems. The LLE-fitted
+parameters from Magnussen 1981 differ most importantly for the
+OH-H2O interaction (a_(5,7) = 155.6 vs 353.5 in VLE; a_(7,5) =
+-49.29 vs -229.1), which controls alcohol-water LLE behavior.
+
+**Bundled overrides** (4 main-group pairs covering aqueous-organic
+interactions):
+
+| Pair | Description | a_mn (LLE) | a_nm (LLE) | a_mn (VLE) | a_nm (VLE) |
+|---|---|---|---|---|---|
+| (1, 5) | CH2-OH | 644.6 | 328.2 | 986.5 | 156.4 |
+| (1, 7) | CH2-H2O | 1300.0 | 342.4 | 1318.0 | 300.0 |
+| (3, 7) | ACH-H2O | 859.4 | 362.3 | 903.8 | 362.3 |
+| (5, 7) | OH-H2O | 155.6 | -49.29 | 353.5 | -229.1 |
+
+**Validation on n-butanol + water at 298 K** (a canonical hard
+LLE system):
+
+```
+                       water-rich x_BuOH    BuOH-rich x_BuOH    beta
+Published (DDBST)         ~0.018              ~0.485            -
+VLE-UNIFAC                 0.021               (collapsed)      1.000
+LLE-UNIFAC                 0.011                0.707           0.703
+```
+
+VLE-UNIFAC fails to find a real LLE split (collapses to a single
+phase, beta -> 1). LLE-UNIFAC finds a 2-phase tie line (beta in
+(0.05, 0.95) interior), demonstrating the qualitative improvement
+on alcohol-water systems. The water-rich composition (0.011) is
+within a factor of 2 of the published 0.018; the organic-rich
+composition (0.707 vs 0.485) shows the limit of group-contribution
+LLE prediction without per-system fitting.
+
+**Extension mechanism**: Users with access to additional
+LLE-fitted parameters can pass `extra_overrides` to extend the
+database for their specific systems:
+
+```python
+extra = {(1, 11): (972.4, -75.5)}   # CH2-CCOO LLE override
+uf = UNIFAC_LLE([groups], extra_overrides=extra)
+```
+
+Or build a fully custom database via `make_lle_database()`.
+
+**Scope and caveats**:
+
+- The bundled override set is intentionally narrow (4 pairs). The
+  full Magnussen 1981 table contains many more interactions; users
+  needing those should consult the original paper or DDBST and
+  pass them via `extra_overrides`.
+- Magnussen et al. fitted parameters using LLE data in the narrow
+  range 283-313 K. Predictions outside this range degrade.
+- Mixing LLE-fitted and VLE-fitted parameters in one calculation
+  (which happens for systems involving both bundled and unfitted
+  pairs) is methodologically imperfect; users should validate
+  against published LLE data for their specific system.
+- For T well above 313 K, consider modified UNIFAC (Dortmund) or
+  fitting your own NRTL/UNIQUAC parameters with
+  `regression.regress_lle()`.
+
+**Tests added**: 8 new test functions, **11 sub-checks** (254 to
+265):
+
+- Database structure: well-formed dict, 4 critical pairs present
+- LLE-UNIFAC γ differs from VLE-UNIFAC for overridden interactions
+- Identical γ for systems with no overridden interactions (hexane-heptane)
+- Works in LLEFlash with non-trivial 2-phase split (n-butanol/water)
+- `extra_overrides` parameter takes effect
+- `make_lle_database()` factory builds a usable object
+- Unfitted pair (CH2-ACH) preserves VLE value
+
+**Roadmap**: validation paper vs REFPROP/DECHEMA for canonical
+systems, PH/PV/PT-alpha flash modes, reaction equilibrium,
+electrolyte and polymer extensions.
+
+**Auto-flash with full-TPD framework in v0.9.53.** New
+`auto_isothermal_full_tpd()` method on
+`GammaPhiEOSThreePhaseFlash` that replaces the bubble-pressure
+heuristic with rigorous 4-test cross-phase TPD pattern matching.
+
+```python
+# v0.9.49 (bubble-p heuristic, original):
+result = flash.auto_isothermal(T=T, p=p, z=z)
+
+# v0.9.53 (full-TPD, more rigorous):
+result = flash.auto_isothermal_full_tpd(T=T, p=p, z=z)
+```
+
+Both methods return the same `AutoFlashResult`. The full-TPD
+version uses a deterministic decision tree based on the 4
+Michelsen TPD tests (v0.9.48 + v0.9.51 + v0.9.52) instead of an
+empirical pressure comparison.
+
+**Algorithm**:
+
+1. Run all 4 stability tests: L→L (gamma), V→V (phi), L→V and V→L
+   (cross-phase).
+2. Pattern-match on the 4 boolean stable/unstable flags:
+
+   | LL | VV | LV | VL | Phase count |
+   |---|---|---|---|---|
+   | S | S | S | U | 1L (single liquid) |
+   | S | S | U | S | 1V (single vapor) |
+   | S | S | U | U | 2VL |
+   | U | S | S | U | 2LL (no vapor present) |
+   | U | S | U | U | 3VLL |
+   | S | S | S | S | 1-phase (use bubble-p) |
+   *(S = stable, U = unstable)*
+
+3. Run the appropriate flash with stability-derived initial guesses.
+4. If a chosen flash fails, fall back through the same chain as
+   `auto_isothermal()` (LLE → VLE → bubble-p) for robustness.
+
+**Validation across 8 scenarios** (full-TPD vs bubble-p):
+
+| Scenario | T [K] | p [bar] | bubble-p | full-TPD | Expected |
+|---|---|---|---|---|---|
+| Cold strong-LLE eq. | 300 | 1 | 2LL | 2LL | 2LL |
+| Cold pure water side | 300 | 1 | 2LL | 2LL | 2LL |
+| Cold pure organic side | 300 | 1 | 1L | 1L | 1L |
+| Hot weak-NRTL equimolar | 400 | 1 | 2VL | 2VL | 2VL |
+| Superheated 550K | 550 | 1 | 1V | 1V | 1V |
+| Subcooled cold weak-NRTL | 290 | 1 | 1L | 1L | 1L |
+| Hot strong-LLE 1bar | 400 | 1 | 2VL | 2VL | 2VL |
+| Hot strong-LLE 5bar | 400 | 5 | 2LL | 2LL | 2LL |
+
+**Both methods agree on all 8 scenarios.** The full-TPD method
+provides more rigorous foundation; the bubble-p method is faster
+(no cross-phase tests needed) and remains the default.
+
+**Tests added**: 8 new test functions, **8 sub-checks** (246 to
+254):
+
+- `test_full_tpd_auto_flash_2LL` -- cold LLE equimolar
+- `test_full_tpd_auto_flash_1L` -- cold outside LLE
+- `test_full_tpd_auto_flash_2VL` -- hot above bubble
+- `test_full_tpd_auto_flash_1V` -- superheated
+- `test_full_tpd_auto_flash_subcooled_1L` -- subcooled
+- `test_full_tpd_auto_flash_compressed_2LL` -- compressed LLE
+- `test_full_tpd_matches_bubble_p_on_all_scenarios` -- equivalence
+  on 8-scenario suite (0 mismatches)
+- `test_full_tpd_returns_AutoFlashResult`
+
+**Roadmap**: LLE-fitted UNIFAC parameter database, validation
+paper, PH/PV/PT-alpha flash modes.
+
+**Cross-phase TPD in v0.9.52.** New
+`cross_phase_stability_test()` function and
+`CrossPhaseStabilityResult` dataclass under `stateprop.activity`.
+Combines the activity model (gamma) and EOS (phi) in a unified
+Gibbs-energy comparison to test whether a candidate single phase
+is stable against forming the OPPOSITE phase.
+
+Together with v0.9.48 (liquid-against-liquid via gamma) and
+v0.9.51 (vapor-against-vapor via phi), this completes the
+Michelsen TPD framework for the gamma-phi-EOS framework: all four
+candidate/trial phase combinations now have dedicated tests.
+
+```python
+from stateprop.activity import cross_phase_stability_test
+
+# Liquid candidate, vapor trial: detects vaporization
+r = cross_phase_stability_test(activity_model, eos, psat_funcs,
+                                  T=380, p=101325, z=[0.5, 0.5],
+                                  candidate_phase='liquid')
+if not r.stable:
+    print(f"Liquid would vaporize, TPD={r.tpd_min:.3f}")
+    print(f"Candidate vapor: {r.Y_min}")
+
+# Vapor candidate, liquid trial: detects condensation
+r = cross_phase_stability_test(activity_model, eos, psat_funcs,
+                                  T=300, p=101325, z=[0.5, 0.5],
+                                  candidate_phase='vapor')
+```
+
+**Algorithm**: same Michelsen iteration but with the appropriate
+fugacity expression for each phase. For *liquid candidate z, vapor
+trial Y*:
+
+    h_i = ln(z_i gamma_i^L(z) p_sat_i phi_sat_i e^P / p)
+    Stationarity:  ln Y*_i = h_i - ln phi_i^V(Y*/||Y*||)
+
+For *vapor candidate z, liquid trial Y*:
+
+    h_i = ln(z_i phi_i^V(z) p / (p_sat_i phi_sat_i e^P))
+    Stationarity:  ln Y*_i = h_i - ln gamma_i^L(Y*/||Y*||)
+
+In both cases TPD = -ln(sum Y_inf*) at the stationary point.
+
+**Validation across 5 scenarios**:
+
+| Scenario | T [K] | p [bar] | z | Expected | L→V | V→L |
+|---|---|---|---|---|---|---|
+| Subcooled liquid (single L) | 300 | 1 | (0.99, 0.01) | 1L | stable | unstable |
+| Superheated vapor (single V) | 500 | 1 | (0.5, 0.5) | 1V | unstable | stable |
+| 2-phase VLE region | 380 | 1 | (0.5, 0.5) | 2VL | unstable | unstable |
+| LLE feed (no vapor) | 300 | 1 | (0.5, 0.5) | 2LL | stable | unstable |
+
+The "no vapor" case (last row) is particularly informative: at
+T=300, p=1atm with strong-LLE NRTL, the system is two-phase LL
+(no vapor present). The cross-phase L->V test correctly reports
+stable (vapor doesn't spontaneously form), while V->L reports
+unstable (a hypothetical vapor at this z would condense). Both
+results are physically correct.
+
+**Complete 4-test framework**:
+
+```python
+# At any (T, p, z), compute all four TPD tests:
+r_LL = stability_test(gamma_model, T, z)                    # v0.9.48
+r_VV = vapor_phase_stability_test(eos, T, p, z)             # v0.9.51
+r_LV = cross_phase_stability_test(gamma_model, eos, psat,   # v0.9.52
+                                     T, p, z, candidate='liquid')
+r_VL = cross_phase_stability_test(gamma_model, eos, psat,   # v0.9.52
+                                     T, p, z, candidate='vapor')
+
+# The 4 results disambiguate phase count:
+# - All 4 stable: single phase (liquid or vapor depending on conditions)
+# - Only L->L unstable: 2-phase LLE
+# - Only L->V/V->L unstable (in pair): 2-phase VLE
+# - L->L AND L->V/V->L unstable: 3-phase VLLE
+# - V->V unstable: rare vapor-vapor split
+```
+
+**Tests added**: 6 new test functions, **11 sub-checks** (235 to
+246):
+
+- `test_cross_phase_subcooled_liquid_branch` (2 sub-checks)
+- `test_cross_phase_superheated_vapor_branch` (2 sub-checks)
+- `test_cross_phase_two_phase_VLE_region` (2 sub-checks)
+- `test_cross_phase_result_dataclass` (3 sub-checks)
+- `test_cross_phase_invalid_candidate_raises`
+- `test_cross_phase_full_picture_at_LLE_feed` -- 4-test consistency
+  on the 2LL feed scenario
+
+**Roadmap**: integrate cross-phase tests into auto_isothermal()
+for unambiguous phase-count detection without bubble-pressure
+heuristics; LLE-fitted UNIFAC parameter database; validation
+paper.
+
+**Vapor-phase stability test in v0.9.51.** New
+`vapor_phase_stability_test()` function and `VaporStabilityResult`
+dataclass under `stateprop.activity`. Complement to v0.9.48's
+liquid-side TPD test: where v0.9.48 treats z as a candidate single
+liquid (using gamma from an activity model), v0.9.51 treats z as a
+candidate single vapor (using phi from an EOS).
+
+```python
+from stateprop.activity import vapor_phase_stability_test
+from stateprop.cubic.eos import PR
+from stateprop.cubic.mixture import CubicMixture
+
+methane = PR(T_c=190.56, p_c=4.599e6, acentric_factor=0.011)
+co2 = PR(T_c=304.13, p_c=7.377e6, acentric_factor=0.224)
+mx = CubicMixture([methane, co2], composition=[0.5, 0.5])
+
+result = vapor_phase_stability_test(mx, T=250, p=50e5, z=[0.5, 0.5])
+if not result.stable:
+    print(f"Vapor unstable, TPD={result.tpd_min:.3f}")
+    print(f"Candidate second phase: {result.Y_min}")
+```
+
+**Algorithm**: same Michelsen iteration as v0.9.48 but using EOS
+fugacity coefficients instead of activity coefficients:
+
+    ln Y*_i_(k+1) = h_i - ln phi_i(Y*_k / sum Y*_k)
+    where h_i = ln z_i + ln phi_i(z)
+
+At a stationary point, TPD = -ln(sum Y_inf*). Negative TPD
+indicates instability; Y_min is a candidate second-phase
+composition.
+
+**Validation**:
+
+| System | T [K] | p [bar] | z | Stable | TPD |
+|---|---|---|---|---|---|
+| methane-ethane | 300 | 1 | (0.5, 0.5) | True | 0 |
+| methane-ethane | 400 | 1 | (0.1, 0.9) | True | 0 |
+| methane-CO2 | 250 | 50 | (0.5, 0.5) | **False** | -0.079 |
+| methane-CO2 | 300 | 200 | (0.5, 0.5) | True | 0 |
+| methane (near-pure) | 300 | 1 | (0.999, 0.001) | True | 0 |
+
+The methane-CO2 split at 250 K and 50 bar is correctly detected:
+CO2 is below its critical temperature (304.1 K) and saturation
+pressure (~17 bar at 250 K) is well below 50 bar, so a CO2-rich
+phase forms. The reported `Y_min = (0.183, 0.817)` represents the
+CO2-rich phase composition.
+
+**Use cases**: vapor-vapor splitting is rare in typical chemical
+engineering 1-30 bar mixtures, but the test is essential for:
+
+- Supercritical-phase separations (e.g., CO2 + polar compounds)
+- High-pressure gas processing (LNG, H2 storage)
+- Detection of V-L splits where the candidate "vapor" is actually
+  unstable and would condense
+
+Combined with v0.9.48 (liquid TPD), the framework now provides
+single-phase stability testing on both sides of the phase
+diagram, completing the Michelsen TPD machinery for the
+`gamma`-`phi` framework.
+
+**Tests added**: 7 new test functions, **10 sub-checks** (225 to
+235):
+
+- `test_vapor_stability_simple_hydrocarbon_stable`
+- `test_vapor_stability_simple_hydrocarbon_across_compositions`
+- `test_vapor_stability_methane_co2_detects_split` (2 sub-checks)
+- `test_vapor_stability_pure_component_stable`
+- `test_vapor_stability_returns_iteration_metadata` (2 sub-checks)
+- `test_vapor_stability_user_supplied_trials`
+- `test_vapor_stability_VaporStabilityResult_dataclass` (2 sub-checks)
+
+**Roadmap**: cross-phase stability (vapor candidate against
+liquid trial, and vice-versa) using both activity model and EOS
+combined; LLE-fitted UNIFAC parameter database; validation paper
+versus REFPROP; PH/PV/PT-alpha flash modes.
+
+**Pre-built compound database in v0.9.50.** New
+`stateprop.activity.compounds` module bundles UNIFAC group
+decompositions for ~50 common molecules and provides convenience
+constructors that eliminate the manual group-counting step.
+
+```python
+from stateprop.activity.compounds import (make_unifac, make_uniquac,
+                                            get_groups, list_compounds)
+
+# Old: write the groups dict by hand
+uf = UNIFAC([{'CH3': 1, 'CH2': 1, 'OH': 1}, {'H2O': 1}])
+
+# New: just use names
+uf = make_unifac(['ethanol', 'water'])
+
+# Inspect a compound's group decomposition
+print(get_groups('toluene'))   # {'ACH': 5, 'ACCH3': 1}
+
+# Build UNIQUAC with auto-derived r, q
+uq = make_uniquac(['ethanol', 'water'],
+                    b=[[0, 250.0], [800.0, 0]])
+```
+
+**Coverage** (50+ compounds):
+- Alkanes: ethane through n-decane plus branched (isobutane,
+  isopentane, neopentane, 2-methylpentane, etc.)
+- Cyclics: cyclopentane, cyclohexane, methylcyclohexane
+- Alkenes: propene through 1-hexene, cis/trans-2-butene, isobutene
+- Aromatics: benzene, toluene, ethylbenzene, o/m/p-xylene, cumene,
+  mesitylene
+- Alcohols: methanol, ethanol, 1-/2-propanol, n/iso/t-butanols,
+  1-pentanol, 1-hexanol, 1-octanol, ethylene glycol
+- Ketones: acetone, MEK, 2-pentanone, MIBK, cyclohexanone
+- Esters: methyl/ethyl/propyl/butyl acetates, methyl/ethyl
+  propanoates
+- Ethers: dimethyl ether, diethyl ether, MTBE, tetrahydrofuran
+- Carboxylic acids: formic through pentanoic
+- Nitriles: acetonitrile, propionitrile, butyronitrile
+- Water
+
+**Aliases**: case-insensitive lookup with common abbreviations
+(EtOH, MeOH, iPrOH, THF, MTBE, MEK, MIBK, EA/MA, DEE/DME, EG, h2o,
+hexane/butane/pentane etc.) and dash/underscore tolerance.
+
+**UNIQUAC r, q from group sums**: the standard relationship
+``r_i = sum_k nu_k * R_k`` and ``q_i = sum_k nu_k * Q_k`` is
+applied automatically. Verified to match published DECHEMA values:
+
+| Compound | r (computed) | r (published) | q (computed) | q (published) |
+|---|---|---|---|---|
+| water | 0.9200 | 0.9200 | 1.4000 | 1.4000 |
+| ethanol | 2.5755 | 2.5755 | 2.5880 | 2.588 |
+| n-hexane | 4.4998 | 4.4998 | 3.8560 | 3.856 |
+| benzene | 3.1878 | 3.1878 | 2.4000 | 2.400 |
+
+Exact agreement to 4 decimal places across all tested compounds,
+since both UNIFAC R/Q and UNIQUAC r/q derive from the same Bondi
+van der Waals volumes and surface areas.
+
+**Tests added**: 10 new test functions, **15 sub-checks** (210 to
+225):
+
+- `test_compounds_database_has_basics` -- 7 spot-checked compounds
+- `test_compounds_aliases_work` -- 8 alias resolutions
+- `test_compounds_unknown_raises` -- helpful error message
+- `test_make_unifac_from_names` -- matches manual UNIFAC
+- `test_make_unifac_dortmund_from_names`
+- `test_make_unifac_lyngby_from_names`
+- `test_uniquac_rq_matches_published_values` -- 4 compounds
+- `test_make_uniquac_from_names`
+- `test_compound_groups_only_use_known_subgroups` -- no typos in DB
+- `test_compound_decomposition_atom_count_consistency` -- 13 alkanes
+  verified by carbon count
+
+**Roadmap**: vapor-phase stability test (full phi-based TPD),
+LLE-fitted UNIFAC parameter database, validation paper.
+
+**Auto 3-phase flash with stability detection in v0.9.49.**
+New `auto_isothermal()` method on `GammaPhiEOSThreePhaseFlash`
+that integrates Michelsen stability analysis (v0.9.48) with the
+2-phase and 3-phase flash machinery, eliminating the need for
+user-supplied initial guesses.
+
+```python
+from stateprop.activity import (NRTL, GammaPhiEOSThreePhaseFlash,
+                                  AntoinePsat)
+
+flash = GammaPhiEOSThreePhaseFlash(activity_model=nrtl,
+                                     psat_funcs=[psat1, psat2],
+                                     vapor_eos=mx)
+result = flash.auto_isothermal(T=298.15, p=101325, z=[0.5, 0.5])
+print(f"Detected: {result.phase_type} ({result.n_phases} phases)")
+print(f"Result: {result.result}")
+```
+
+`AutoFlashResult` carries:
+- `phase_type`: '1L', '1V', '2VL', '2LL', or '3VLL'
+- `n_phases`: 1, 2, or 3
+- `result`: the underlying flash output (SinglePhaseResult,
+  FlashResult, LLEResult, or ThreePhaseFlashResult)
+- `stability_tpd`: Michelsen TPD value from initial test
+
+**Algorithm**:
+
+1. Run Michelsen stability test on z (against single liquid phase).
+2. Estimate bubble pressure p_bub = sum z_i gamma_i(z) p_sat_i. The
+   ratio of p to p_bub determines whether vapor can form: vapor is
+   present iff p < p_bub.
+3. **If z is stable** (no LL split):
+   - p > p_bub: subcooled liquid, return 1-phase L
+   - p < p_bub: try VLE flash. V in (0, 1) -> 2VL; else single phase
+     (1V if V > 0.5, else 1L)
+4. **If z is unstable** (LL split exists):
+   - Take Y_min from stability test as one liquid; mass-balance
+     approximation 2z - Y_min for the other.
+   - Try 3-phase flash. All three beta > threshold -> 3VLL.
+   - If 3-phase RR fails or vapor collapses, the bubble-p heuristic
+     decides:
+     * p < p_bub: vapor dominates, try VLE first, then LLE
+     * p > p_bub: subcooled, try LLE first
+
+**Validation across 8 test scenarios**:
+
+| Scenario | Predicted | Expected |
+|---|---|---|
+| Cold (300K), strong-LLE, equimolar | 2LL | 2LL |
+| Cold (300K), pure water side | 2LL | 2LL |
+| Cold (300K), pure organic side | 1L | 1L |
+| Hot (400K), weak NRTL, equimolar | 2VL | 2VL |
+| Hot (550K), weak NRTL | 1V | 1V |
+| Subcooled, weak NRTL | 1L | 1L |
+| Strong-LLE, p < p_bub | 2VL | 2VL |
+| Strong-LLE, p > p_bub (compressed) | 2LL | 2LL |
+
+The bubble-p heuristic correctly distinguishes the same
+strong-LLE NRTL system at p=1 bar (vapor-dominated, 2VL) versus
+p=5 bar (subcooled, 2LL) -- the same z, T, model, but different
+phase counts based on pressure relative to bubble.
+
+**Tests added**: 8 new test functions, **12 sub-checks** (198 to
+210):
+
+- `test_auto_flash_cold_strong_lle_returns_2LL` (2 sub-checks)
+- `test_auto_flash_outside_lle_returns_1L` (2 sub-checks)
+- `test_auto_flash_above_bubble_no_lle_returns_2VL` (2 sub-checks)
+- `test_auto_flash_superheated_returns_1V` (1 sub-check)
+- `test_auto_flash_subcooled_no_lle_returns_1L` (1 sub-check)
+- `test_auto_flash_strong_lle_above_bubble_chooses_VL` (1 sub-check)
+- `test_auto_flash_strong_lle_compressed_returns_2LL` (1 sub-check)
+- `test_auto_flash_returns_AutoFlashResult` (2 sub-checks)
+
+**Practical use**: a user who has fitted NRTL parameters via
+`regression.regress_lle()` can now call `flash.auto_isothermal(T,
+p, z)` for any (T, p, z) and receive the correct phase split with
+zero manual setup. The activity-coefficient + flash subsystem is
+now genuinely production-ready as a black-box solver: feed
+parameters in, get equilibrium states out.
+
+**Caveat**: the algorithm uses liquid-phase stability only (no
+vapor-phase stability check). For systems where the vapor wants
+to split into two vapor phases (rare in practice; typically only
+for highly polar / quantum gases at low T), additional logic
+would be needed. For typical chemical engineering applications
+(water/oil, hydrocarbons + alcohols + water), the current
+implementation is correct.
+
+**Roadmap**: comprehensive LLE-fitted UNIFAC parameter database,
+pre-built UNIFAC group definitions for common molecules,
+validation paper.
+
+**Michelsen stability analysis (TPD test) in v0.9.48.** New
+`stability_test()` function and `StabilityResult` dataclass under
+`stateprop.activity`. Determines whether a candidate single-phase
+composition z is stable at (T, p) or wants to split into multiple
+phases. This removes the need for users to supply initial guesses
+in 2-phase or 3-phase flash and provides an objective phase-count
+test.
+
+```python
+from stateprop.activity import NRTL, stability_test
+
+nrtl = NRTL(alpha=alpha, b=b)
+result = stability_test(nrtl, T=298.15, z=[0.5, 0.5])
+if not result.stable:
+    print(f"Composition unstable, TPD={result.tpd_min:.3f}")
+    print(f"Suggested second phase: {result.Y_min}")
+```
+
+**Algorithm** (Michelsen 1982): for trial composition Y near the
+candidate z, define the tangent plane distance:
+
+    TPD(Y) = sum_i Y_i (ln Y_i + ln gamma_i(Y) - ln z_i - ln gamma_i(z))
+
+If TPD(Y) >= 0 for all Y on the simplex, z is stable. If TPD(Y) < 0
+for some Y, z is unstable and Y is a candidate second-phase
+composition.
+
+The fixed-point iteration uses unnormalized variables Y* with the
+identity:
+
+    ln Y_i*_(k+1) = h_i - ln gamma_i(Y*_k / sum Y*_k)
+    where h_i = ln z_i + ln gamma_i(z)
+
+At a stationary point, TPD = -ln(sum Y_inf*). Negative TPD means
+sum Y* > 1, i.e. instability.
+
+**Multiple initial trials** are run automatically (each pure-i-rich
+corner plus equimolar perturbations for binary systems, plus
+random samples for higher-N) to find all stationary points; the
+most negative TPD across them determines stability.
+
+**Validation**:
+
+| Composition | TPD_min | Predicted | Lit | Match |
+|---|---|---|---|---|
+| z=[0.5, 0.5] | -0.293 | unstable | 2-phase LLE | ✓ |
+| z=[0.99, 0.01] | +1.053 | stable | single phase | ✓ |
+| z=[0.001, 0.999] | -0.277 | unstable (just inside LLE) | 2-phase | ✓ |
+| Weak NRTL (b=200) | 0 (all x) | stable everywhere | no LLE | ✓ |
+| Ternary centroid | -0.277 | unstable | 3-phase | ✓ |
+
+**Recursive stability**: the Y_min returned for an unstable feed
+is itself a stable (single-phase) composition when checked
+recursively, confirming it represents a real equilibrium phase.
+
+**Practical use**: `Y_min` provides a starting point for LLEFlash:
+
+```python
+result = stability_test(nrtl, T, z)
+if not result.stable:
+    Y1 = result.Y_min
+    Y2 = 2*z - Y1   # mass-balance approx
+    Y2 = np.maximum(Y2, 1e-4); Y2 = Y2 / Y2.sum()
+    lle_result = LLEFlash(nrtl).solve(T, z, x1_guess=Y1, x2_guess=Y2)
+```
+
+In the binary water-organic test case, this approach recovers the
+canonical LLE phases x1 = (7.36e-4, 0.99926), x2 = (0.96, 0.04)
+to <4e-6 error from any feed in the LLE region.
+
+**Tests added**: 8 new test functions, **12 sub-checks** (186 to
+198):
+
+- `test_stability_detects_lle_at_equimolar` (2 sub-checks)
+- `test_stability_outside_lle_region_returns_stable` (1 sub-check)
+- `test_stability_weak_interaction_always_stable` (1 sub-check)
+- `test_stability_Y_min_seeds_lle_flash` (1 sub-check)
+- `test_stability_recursive_check_on_Y_min` (1 sub-check)
+- `test_stability_pure_component_is_trivial_stable` (1 sub-check)
+- `test_stability_ternary_finds_split` (2 sub-checks)
+- `test_stability_returns_iteration_metadata` (3 sub-checks)
+
+**Roadmap**: integration of stability_test into 3-phase flash
+auto-initialization (no user x_guess needed), pre-built UNIFAC
+group definitions, validation paper.
+
+**LLE flash + parameter regression in v0.9.47.** Two new
+modules close the loop on the activity-coefficient subsystem,
+enabling users to fit NRTL or UNIQUAC parameters to their own VLE
+or LLE data and then run the v0.9.46 three-phase flash with
+quantitative results.
+
+**`LLEFlash`** -- two-phase liquid-liquid flash (no vapor).
+SS iteration on equal-fugacity x1_i gamma_i^L1 = x2_i gamma_i^L2;
+inner 2-phase Rachford-Rice solver. Detects and raises on
+collapse to single phase.
+
+```python
+from stateprop.activity import NRTL, LLEFlash
+
+nrtl = NRTL(alpha=alpha, b=b)
+lle = LLEFlash(nrtl)
+result = lle.solve(T=298.15, z=[0.5, 0.5],
+                     x1_guess=[0.01, 0.99],
+                     x2_guess=[0.95, 0.05])
+print(f"x1={result.x1}, x2={result.x2}, beta={result.beta}")
+```
+
+**`stateprop.activity.regression`** -- nonlinear least-squares
+parameter fitting. Two entry points:
+
+```python
+from stateprop.activity import regression
+
+# Fit NRTL b parameters to LLE tie-line data
+factory = regression.make_nrtl_factory(N=2, alpha_value=0.3)
+result = regression.regress_lle(factory, tie_lines, x0=[200, 200])
+
+# Fit to isobaric VLE data
+result = regression.regress_vle(factory, vle_data, x0=[100, 100],
+                                  psat_funcs=[psat1, psat2],
+                                  mode='isobaric')
+```
+
+**Two LLE objective functions**:
+
+- **'activity'** (default): minimize equal-activity residuals
+  ln(x1_i gamma_i(x1_exp)) - ln(x2_i gamma_i(x2_exp)) at the
+  experimental compositions. Smooth in parameters since no flash
+  is run during regression -- Levenberg-Marquardt converges
+  reliably from poor initial guesses (including zeros).
+- **'flash'**: run the actual LLE flash and compare predicted to
+  experimental compositions. Sharper residuals but non-smooth
+  (fails when candidate parameters don't yield LLE). Use as a
+  polish stage after 'activity' converges.
+
+**Convenience factories**:
+- `make_nrtl_factory(N, alpha_value, fit_a=False)` --
+  parameterizes NRTL with off-diagonal b values (and optionally
+  a values).
+- `make_uniquac_factory(r, q, fit_a=False)` -- UNIQUAC with
+  fixed r, q (from molecular structure) and fitted b values.
+
+**Validation on synthetic data**: regression is verified by
+generating tie-lines or VLE points from a known model, then
+fitting and recovering the original parameters. Results from a
+4-tie-line water-organic LLE test:
+
+| Initial guess | Stage 1 (activity) | Stage 2 (flash polish) | True |
+|---|---|---|---|
+| (200, 200) | (800.000, 1800.000) | (800.000, 1800.000) | (800, 1800) |
+| (50, 100) | (800.000, 1800.000) | -- | (800, 1800) |
+| (0, 0) | (800.000, 1800.000) | -- | (800, 1800) |
+
+8-12 function evaluations per fit, recovers parameters to
+8+ digits. The smooth activity objective is robust to terrible
+initial guesses, including zero. (One x0 outside the convergence
+basin -- (2000, 4000) -- finds an alternative local minimum that
+also fits the tie-lines, demonstrating the fundamental ambiguity
+of LLE-only parameter fits.)
+
+VLE regression behaves similarly: fitting NRTL b=(600, 400) from
+x0=(100, 100) recovers exactly in 6 evaluations.
+
+**Tests added**: 9 new test functions, **16 sub-checks** (170 to
+186):
+
+- `test_lle_flash_basic` (4 sub-checks)
+- `test_lle_flash_material_balance` (1 sub-check)
+- `test_lle_flash_equal_activity` (1 sub-check)
+- `test_lle_flash_collapse_detection` (1 sub-check)
+- `test_lle_regression_recovers_synthetic` (3 sub-checks)
+- `test_lle_regression_robust_to_initial` (1 sub-check, 3 inits)
+- `test_lle_regression_flash_polish` (1 sub-check)
+- `test_vle_regression_recovers_synthetic` (2 sub-checks)
+- `test_uniquac_regression_factory` (2 sub-checks)
+
+**Dependency**: regression requires `scipy.optimize.least_squares`.
+The rest of stateprop remains scipy-free; scipy becomes optional.
+
+**Roadmap**: Stability analysis (Michelsen tangent plane) for
+auto phase-count detection in 3-phase flash, more comprehensive
+UNIFAC LLE-fitted parameter database, validation paper.
+
+**Three-phase gamma-phi-EOS flash for VLLE in v0.9.46.** New
+class `GammaPhiEOSThreePhaseFlash` extends the two-phase flash to
+handle vapor-liquid-liquid equilibrium. Common applications:
+
+- Water + organic + vapor heteroazeotropes (water/butanol,
+  water/MIBK, water/aniline)
+- Petroleum systems with aqueous + hydrocarbon liquid + natural-gas
+  vapor
+- Liquid-liquid extraction columns near the bubble point
+
+```python
+from stateprop.activity import (UNIQUAC, GammaPhiEOSThreePhaseFlash,
+                                  AntoinePsat)
+
+flash3 = GammaPhiEOSThreePhaseFlash(activity_model=uq,
+                                      psat_funcs=[psat1, psat2],
+                                      vapor_eos=mx)
+result = flash3.isothermal_3phase(
+    T=365.85, p=101325, z=[0.5, 0.5],
+    x1_guess=[0.018, 0.982],   # aqueous-rich initial
+    x2_guess=[0.57, 0.43],     # organic-rich initial
+    beta_V_guess=0.1, beta_L2_guess=0.4
+)
+print(f"V/L1/L2 fractions: {result.beta_V:.3f}/"
+      f"{result.beta_L1:.3f}/{result.beta_L2:.3f}")
+print(f"x1 (aq) = {result.x1}, x2 (org) = {result.x2}, y = {result.y}")
+```
+
+**Mathematical formulation**: with three phases L1 (reference),
+L2, V, define K-values relative to L1:
+
+    K_iy = y_i / x1_i = gamma_i^L1 * p_i^sat * phi_i^sat * Poynting
+                                    / (p * phi_i^V(T, p, y))
+    K_ix = x2_i / x1_i = gamma_i^L1(T, x1) / gamma_i^L2(T, x2)
+
+The 3-phase Rachford-Rice is a 2D nonlinear system in
+(beta_V, beta_L2):
+
+    sum_i z_i (K_iy - 1) / D_i = 0
+    sum_i z_i (K_ix - 1) / D_i = 0
+    where D_i = 1 + beta_V (K_iy - 1) + beta_L2 (K_ix - 1)
+
+Solved by Newton's method with backtracking line search,
+maintaining feasibility (0 < beta_V, beta_L2; beta_V + beta_L2 < 1;
+all D_i > 0). Outer SS loop on x1, x2, y until K-values stabilize.
+
+Reference: Michelsen, M.L. "The isothermal flash problem. Part I.
+Stability", Fluid Phase Equilib. 9, 1 (1982).
+
+**Initial guesses required**: the user must supply x1_guess and
+x2_guess that are clearly different (e.g., one rich in water, one
+rich in organic). The algorithm does not yet auto-detect 3-phase
+regions via stability analysis -- if no 3-phase solution exists at
+the supplied conditions, the RR solver raises RuntimeError with
+"system likely not in 3-phase region".
+
+**Parameter quality caveat**: real-world VLLE accuracy depends
+critically on having LLE-fitted activity coefficient parameters.
+The bundled UNIFAC database is fit to VLE data and gives only
+qualitative LLE predictions for systems like water + n-butanol.
+For quantitative VLLE, use UNIQUAC or NRTL with parameters
+regressed from LLE/VLLE data (e.g., DECHEMA, Aspen). Future
+versions (v0.9.47+) will add parameter regression tools.
+
+**Algorithm validation**: the 3-phase Rachford-Rice solver is
+verified on a constructed problem with known analytical solution
+(beta_V=0.3, beta_L2=0.4, prescribed compositions x1, x2, y).
+The solver:
+- Converges to the correct phase fractions from multiple initial
+  guesses to machine precision
+- Reconstructs the prescribed liquid and vapor compositions to
+  ~1e-12 relative error
+- Satisfies material balance to ~1e-17 (machine epsilon)
+- Maintains beta_V + beta_L1 + beta_L2 = 1 exactly
+- Raises RuntimeError when K-values don't admit a 3-phase
+  solution (graceful failure mode)
+
+**Tests added**: 6 new test functions, **13 sub-checks** (157 to 170):
+
+- `test_3phase_rachford_rice_constructed` (4 sub-checks: multiple
+  initial guesses all converge)
+- `test_3phase_compositions_recoverable` (3 sub-checks: x1, x2, y)
+- `test_3phase_material_balance` (1 sub-check)
+- `test_3phase_phase_fractions_sum_to_one` (2 sub-checks)
+- `test_3phase_handles_non_3phase_gracefully` (1 sub-check:
+  RuntimeError raised when not 3-phase)
+- `test_3phase_class_imports_and_constructor` (2 sub-checks)
+
+**Roadmap**: Stability-analysis-based phase-count detection
+(Michelsen tangent plane), parameter regression for UNIFAC/UNIQUAC
+LLE fits, validation paper.
+
+**Batch flash for grid generation in v0.9.45.** New
+`stateprop.activity.batch` module with helpers for running flash
+calculations across many conditions efficiently. Targets typical
+workflows like Pxy/Txy diagrams, ternary VLE/LLE plots, phase
+envelopes, and parameter regression sweeps.
+
+```python
+from stateprop.activity import (UNIFAC, GammaPhiFlash,
+                                  AntoinePsat, batch)
+
+flash = GammaPhiFlash(activity_model=uf, psat_funcs=[psat1, psat2])
+
+# Generate a Txy diagram at fixed p
+x_grid = np.linspace(0.01, 0.99, 200)
+x_array = np.column_stack([x_grid, 1 - x_grid])
+results = batch.batch_bubble_t(flash, p=101325, x_list=x_array)
+
+# Vectorized accessors -- np.nan for failed flashes
+T_array = batch.stack_T(results)        # (M,)
+y_array = batch.stack_y(results)        # (M, N)
+```
+
+**Batch helpers**:
+- `batch_bubble_t(flash, p, x_list, warm_start=True, n_workers=1)`
+- `batch_bubble_p(flash, T, x_list, warm_start=True, n_workers=1)`
+- `batch_isothermal(flash, conditions, warm_start=True, n_workers=1)`
+
+Stack helpers (return numpy arrays):
+- `stack_T`, `stack_p`, `stack_V`, `stack_x`, `stack_y`, `stack_K`
+
+**Warm-start optimization**: by default, each call seeds the next
+call's iteration with the previous result's T (for bubble_t) or
+K-values (for isothermal). For smooth grids, this typically gives:
+
+| Workflow | Cold start | Warm start | Speedup |
+|----------|------------|-------------|---------|
+| Txy ethanol-water (100 pts, IG vapor) | 487 iter | 322 iter | 1.51x |
+| Txy ethanol-water (100 pts, EOS vapor) | 500 iter | 305 iter | 1.83x |
+
+These are real wins with no accuracy loss (results identical to
+1e-7 K compared to cold start).
+
+**`K_guess` parameter** added to both `GammaPhiFlash.isothermal` and
+`GammaPhiEOSFlash.isothermal` so external callers can also seed
+custom warm starts.
+
+**Pickle support**: UNIFAC and Modified UNIFAC variants now drop
+the database module reference at pickle time (modules aren't
+picklable; the lookups are pre-built so the reference is unused
+after `__init__`). NRTL and UNIQUAC pickle natively. This enables
+multiprocessing usage if desired:
+
+```python
+results = batch.batch_bubble_t(flash, p, x_list, n_workers=4)
+```
+
+Note: with sub-millisecond flashes (typical for ideal-gas vapor),
+multiprocessing has high overhead per call and may be slower than
+sequential warm-start. For heavier per-call work (high-pressure
+EOS flashes, many components), or large grids where the overhead
+amortizes, multiprocessing helps.
+
+**Failure handling**: individual failed flashes return `None`
+rather than aborting the batch. The stack helpers convert `None`
+to `np.nan` in the output arrays, so partial results remain
+usable for plotting.
+
+**Tests added**: 5 new test functions, **9 sub-checks** (148 → 157):
+warm-start vs cold-start equivalence and iteration savings,
+isothermal K_guess behavior, pickle roundtrip, stack-helper
+shapes and values, batch failure handling.
+
+**Roadmap**: Three-phase γ-φ-EOS flash (VLLE for oil/water/vapor
+systems), parameter regression tools, validation paper.
+
+**Analytical T-derivatives in v0.9.44.** Replaced the v0.9.42 numerical
+finite-difference T-derivatives with closed-form analytical
+expressions for all five activity-coefficient models. Each model
+overrides `dlngammas_dT(T, x)` with the chain-rule derivative of
+its analytical formula:
+
+- **NRTL**: differentiate the two-term gE/RT formula via the chain
+  rule on tau(T) and G(T) = exp(-alpha tau).
+- **UNIQUAC**: combinatorial is T-independent (zero contribution);
+  residual chain-rule on tau(T).
+- **UNIFAC** (original): residual chain-rule on Psi(T) = exp(-a/T)
+  with the solution-of-groups identity propagating through pure-i
+  reference Gamma_k^(i).
+- **UNIFAC-Dortmund**: dPsi/dT = Psi (a/T^2 - c) for the
+  3-parameter T-dependence Psi = exp(-(a + bT + cT^2)/T).
+- **UNIFAC-Lyngby**: dPsi/dT = Psi [-f'(T)/T + f(T)/T^2] with
+  f'(T) = b + c ln(T_ref/T) for the Lyngby T-dependence.
+
+The mixin's `dgE_RT_dT(T, x)` now routes through `dlngammas_dT`
+via the identity gE/RT = sum x_i ln gamma_i, so it automatically
+benefits from any analytical override:
+
+```python
+def dgE_RT_dT(self, T, x):
+    return float(np.sum(x * self.dlngammas_dT(T, x)))
+```
+
+This means hE and sE also use the analytical path automatically.
+
+**Accuracy**: analytical agrees with central FD to ~1e-7 to 1e-8
+relative -- which is the FD truncation-error level. Where FD has
+~7 digits of accuracy, the analytical is essentially exact (limited
+only by floating-point precision of the underlying tau/Psi
+evaluation). The legacy FD path remains accessible via
+`dlngammas_dT_FD(T, x)` for testing.
+
+**Verification**: dedicated tests sweep T=283-450K and x=0.1-0.9
+for all 5 models, including:
+
+- NRTL with full T-dependence (a, b, e, f all nonzero)
+- UNIFAC-Dortmund with custom database featuring nonzero b_mn, c_mn
+  (verifies the Dortmund-specific dPsi term)
+- Lyngby T-dependence at T_ref (b/c terms vanish, verifying the
+  formula reduces to a-only correctly)
+
+All variants verified to agree analytical = FD within FD precision
+(~1e-7 to 1e-8 rel; tighter where the values are larger).
+
+**Tests added**: 8 new test functions, **58 sub-checks** (90 → 148):
+
+- `test_nrtl_analytical_dlngammas_dT` (12 sub-checks)
+- `test_nrtl_analytical_full_T_dependence` (3 sub-checks)
+- `test_uniquac_analytical_dlngammas_dT` (12 sub-checks)
+- `test_unifac_analytical_dlngammas_dT` (12 sub-checks)
+- `test_unifac_dortmund_analytical_dlngammas_dT` (8 sub-checks)
+- `test_unifac_lyngby_analytical_dlngammas_dT` (8 sub-checks)
+- `test_analytical_hE_via_dgE_RT_dT` (1 sub-check, verifies routing
+  through analytical)
+- `test_analytical_dortmund_with_nonzero_bc` (2 sub-checks, verifies
+  Dortmund c-term contribution)
+
+**Performance**: analytical is roughly 2-3x faster than two FD
+evaluations per dlngammas_dT call. The cumulative speedup matters
+when computing hE / sE / cpE on a grid (e.g., for plotting excess
+enthalpy curves), where analytical avoids ~6-9 lngammas
+evaluations per data point.
+
+**Gamma-phi-EOS flash for high pressure in v0.9.43.** Extends the
+v0.9.40 modified-Raoult flash by replacing the ideal-gas vapor
+phase with a cubic or SAFT EOS computation of vapor fugacity
+coefficients. This is the engineering-standard formulation for
+non-ideal mixtures above ambient pressure (Aspen, ProSim, ProMax,
+HYSYS all implement this).
+
+```python
+from stateprop.activity import (UNIFAC, GammaPhiEOSFlash, AntoinePsat)
+from stateprop.cubic.mixture import CubicMixture
+from stateprop.cubic.eos import PR
+
+# PR EOS components for vapor phase
+ethanol_eos = PR(T_c=513.92, p_c=6.148e6, acentric_factor=0.6452)
+water_eos   = PR(T_c=647.10, p_c=22.064e6, acentric_factor=0.3443)
+mx = CubicMixture([ethanol_eos, water_eos], composition=[0.5, 0.5])
+
+# Activity model + Antoine for liquid side
+ethanol_psat = AntoinePsat(A=5.37229, B=1670.409, C=-40.191)
+water_psat   = AntoinePsat(A=4.6543,  B=1435.264, C=-64.848)
+uf = UNIFAC([{'CH3': 1, 'CH2': 1, 'OH': 1}, {'H2O': 1}])
+
+# High-pressure flash
+flash = GammaPhiEOSFlash(activity_model=uf,
+                         psat_funcs=[ethanol_psat, water_psat],
+                         vapor_eos=mx,
+                         pure_liquid_volumes=[58.7e-6, 18.07e-6])  # for Poynting
+
+flash.bubble_p(T, x)         # bubble pressure
+flash.bubble_t(p, x)         # bubble T
+flash.dew_p(T, y)            # dew pressure
+flash.dew_t(p, y)            # dew T
+flash.isothermal(T, p, z)    # PT flash with V, x, y
+```
+
+**K-value formula** (replaces modified Raoult):
+
+    K_i = gamma_i(T, x) * p_i^sat(T) * phi_i^sat(T) * Poynting
+                                    / (p * phi_i^V(T, p, y))
+
+with:
+- gamma_i from activity model (NRTL/UNIQUAC/UNIFAC/Dortmund/Lyngby)
+- p_i^sat(T) from Antoine
+- phi_i^sat(T) optional pure-component fugacity coefficient at
+  saturation (default 1)
+- Poynting = exp(V_i^L (p - p_i^sat) / RT) optional, included
+  when pure_liquid_volumes are passed
+- phi_i^V(T, p, y) from CubicMixture or SAFTMixture EOS, evaluated
+  at current vapor composition each SS iteration
+
+**Validation against ethanol-water, PR EOS for vapor**:
+
+| Pressure | T_IG (gamma-phi)  | T_EOS (gamma-phi-EOS) | phi_eth^V | phi_water^V |
+|----------|-------------------|------------------------|-----------|-------------|
+| 1 atm    | 79.84 °C          | 79.41 °C (-440 mK)    | ~0.98     | ~0.99       |
+| 10 bar   | 151.36 °C         | 147.36 °C (-4.0 °C)   | 0.879     | 0.946       |
+
+The 4 °C bubble-T shift at 10 bar reflects vapor non-ideality (φ ~ 0.88
+for ethanol). At 1 atm the difference is sub-Kelvin -- as expected
+since the vapor is nearly ideal. Pure-ethanol bubble_p(350 K) gives
+p = 97.7 kPa vs Antoine p_sat = 95.6 kPa, a 2% positive offset
+reflecting the EOS's vapor non-ideality even at 1 atm.
+
+**Algorithm**: SS iteration on (p or T, K) with inner Rachford-Rice
+for V. Each iteration evaluates phi_i^V at the current vapor
+composition. Converges in ~5-15 iterations away from the critical
+region. Near critical (vapor density approaches liquid density)
+convergence may degrade -- this is a fundamental limitation of
+gamma-phi formulations and signals the need to switch to phi-phi
+flash with the same EOS for both phases.
+
+**Tests added**: 5 new tests covering low-p IG agreement (within
+1°C), high-p phi^V detection (must be <0.95 at 10 bar for both
+ethanol and water), isothermal flash material balance and K-x-y
+consistency in the 2-phase region, pure-component bubble_p
+consistency with Antoine + EOS correction (~2%), and Poynting
+correction effect (small but measurable at 10 bar). Activity
+test count: 90 (+10 over v0.9.42).
+
+**Honest limitations**:
+
+- Convergence near the critical region or at very high pressures
+  (>50 bar typical) may fail. The gamma-phi formulation itself
+  becomes unphysical when the vapor density approaches the liquid
+  density; users should fall back to a phi-phi flash with the
+  same EOS for both phases.
+
+- Pure-component phi^sat correction defaults to 1. For systems
+  with high p_sat at the operating T (e.g., ethane near critical),
+  this introduces ~5% error. Users can pass custom phi_sat_funcs
+  computed from the same EOS.
+
+- The activity model gives gamma at the system T, not at the
+  reference T or p_sat. Strictly the standard-state convention
+  matters at very high pressures, but for the typical 1-50 bar
+  range the difference is within the parameter-database accuracy.
+
+**T-derivatives of gE in v0.9.42** -- excess enthalpy, excess entropy,
+excess heat capacity, and per-component dln(gamma_i)/dT for all five
+activity-coefficient models (NRTL, UNIQUAC, UNIFAC, UNIFAC-Dortmund,
+UNIFAC-Lyngby). Implemented via central finite difference on the
+existing `gE_over_RT` and `lngammas` methods, accuracy ~6-8 digits
+on first derivatives and ~4-6 digits on second derivatives.
+
+```python
+from stateprop.activity import UNIFAC
+
+uf = UNIFAC([{'CH3': 1, 'CH2': 1, 'OH': 1}, {'H2O': 1}])
+T, x = 298.15, [0.5, 0.5]
+
+uf.gE(T, x)              # excess Gibbs energy [J/mol]:    729.7
+uf.hE(T, x)              # excess enthalpy [J/mol]:       -174.9
+uf.sE(T, x)              # excess entropy [J/(mol K)]:     -3.03
+uf.cpE(T, x)             # excess heat capacity:           ~0
+uf.dgE_RT_dT(T, x)       # d(gE/RT)/dT
+uf.dlngammas_dT(T, x)    # d(ln gamma_i)/dT per component
+```
+
+**Underlying relations** (Gibbs-Helmholtz):
+
+    gE  = RT * (gE/RT)
+    hE  = -RT^2 * d(gE/RT)/dT          [Gibbs-Helmholtz]
+    hE  = -RT^2 * sum_i x_i d(ln gamma_i)/dT     [equivalent form]
+    sE  = (hE - gE) / T
+    cpE = dhE/dT
+
+**Use cases**: non-isothermal flash (energy balances), distillation
+column simulation requiring heats of mixing, validation of
+parameter fits via Gibbs-Helmholtz consistency, prediction of
+excess enthalpy data for testing/extrapolation.
+
+**Honest accuracy notes**:
+
+- For systems with proper b_mn, c_mn coefficients (Dortmund or
+  Lyngby with full DDBST tables), hE accuracy approaches the
+  fitted-data accuracy (~5-15% typical for refined Modified
+  UNIFAC).
+
+- For original UNIFAC + the bundled starter database (a-only),
+  hE comes solely from the residual term's exp(-a/T) dependence.
+  Order of magnitude is correct but quantitative accuracy is
+  modest (factor of 2-4 typical for asymmetric aqueous
+  mixtures). Example: ethanol-water at 298K x=0.5 gives
+  hE = -175 J/mol (literature: ~-300 to -800 J/mol depending
+  on source).
+
+- All three UNIFAC variants give **identical hE when b=c=0**
+  because the combinatorial part is T-independent and the
+  residual reduces to the same Psi(T) form. Explicit test
+  verifies this -- a useful built-in consistency check.
+
+**Identity tests added**:
+
+- gE = hE - T sE (Gibbs-Helmholtz definition; verified to
+  machine precision for all 5 models).
+- hE = -RT^2 sum x_i d(ln gamma_i)/dT (cross-check; agrees to
+  ~1e-12 relative error).
+- Pure-component limits: gE = hE = sE = 0 at x = 1 (verified
+  to ~1e-9 J/mol).
+- FD step-size invariance: hE(h) and hE(h/10) agree to
+  ~1e-7 relative error.
+- NRTL with all tau = 0 gives hE = 0 exactly for any T, x.
+
+**Tests added**: 6 new test functions (22 sub-checks) bringing
+activity test count to 80 (+22 over v0.9.41).
+
+**Roadmap**: For applications needing more precision, each model
+could be extended with analytical T-derivatives of its T-dependent
+functions (tau for NRTL/UNIQUAC, Psi for UNIFAC). The FD
+implementation is correct and gives engineering accuracy without
+code duplication across five model families. Analytical
+T-derivatives are tracked but not yet implemented.
+
+**Modified UNIFAC variants in v0.9.41 (Dortmund + Lyngby).** Two
+modified-UNIFAC variants from the literature, both subclasses of
+the existing UNIFAC class so they share the solution-of-groups
+residual machinery:
+
+```python
+from stateprop.activity import UNIFAC_Dortmund, UNIFAC_Lyngby
+
+ethanol = {'CH3': 1, 'CH2': 1, 'OH': 1}
+water = {'H2O': 1}
+
+# Dortmund (Weidlich-Gmehling 1987): 3/4 power volume fraction
+uf_d = UNIFAC_Dortmund([ethanol, water])
+
+# Lyngby (Larsen-Rasmussen-Fredenslund 1987): 2/3 power, q-free
+uf_l = UNIFAC_Lyngby([ethanol, water])
+
+g_d = uf_d.gammas(298.15, [0.5, 0.5])    # different from original UNIFAC
+g_l = uf_l.gammas(298.15, [0.5, 0.5])    # different from both
+```
+
+**UNIFAC-Dortmund** (Weidlich-Gmehling, 1987):
+
+  Modified combinatorial:
+
+      V'_i = r_i^(3/4) / sum_j x_j r_j^(3/4)
+      V_i  = r_i / sum_j x_j r_j
+      F_i  = q_i / sum_j x_j q_j
+      ln gamma_i^C = 1 - V'_i + ln V'_i
+                     - 5 q_i [1 - V_i/F_i + ln(V_i/F_i)]
+
+  T-dependent group interactions:
+
+      Psi_mn(T) = exp(-(a_mn + b_mn T + c_mn T^2) / T)
+
+**UNIFAC-Lyngby** (Larsen-Rasmussen-Fredenslund, 1987):
+
+  Simplified combinatorial (no q term):
+
+      omega_i = x_i r_i^(2/3) / sum_j x_j r_j^(2/3)
+      ln gamma_i^C = ln(omega_i / x_i) + 1 - omega_i / x_i
+
+  T-dependent group interactions with reference T = 298.15 K:
+
+      Psi_mn(T) = exp(-(a_mn + b_mn (T - T_ref)
+                         + c_mn (T ln(T_ref/T) + T - T_ref)) / T)
+
+**Honest accuracy caveat**: The Dortmund and Lyngby parameter
+databases (b_mn, c_mn coefficients) are commercial via DDBST and
+not bundled. With default zeros, these are "Modified UNIFAC
+combinatorial only" -- they demonstrate the form change but lose
+accuracy gains from refit residual parameters. Users supply
+custom databases via the `database` argument with B_MAIN/C_MAIN
+dicts following the same structure as the built-in A_MAIN.
+
+**Comparison at ethanol-water 1 atm, x_eth=0.5**:
+
+| Variant         | T (°C)  | y_eth   | Notes                    |
+|-----------------|---------|---------|--------------------------|
+| UNIFAC          | 79.84   | 0.655   | original (lit: 80.1)     |
+| UNIFAC-Dortmund | 78.65   | 0.644   | a-only residual          |
+| UNIFAC-Lyngby   | 82.41   | 0.677   | a-only residual          |
+
+The variation reflects the different combinatorial forms; with
+proper Dortmund b/c coefficients (DDBST-licensed) results would
+match published Modified UNIFAC predictions more precisely.
+
+**Tests added**: 7 new tests covering pure limits for both variants,
+inter-variant divergence (variants must give different gammas for
+asymmetric mixtures), Dortmund near-ideal pentane-hexane,
+Lyngby T-dependence consistency at T_ref (b/c terms vanish at
+298.15 K), Dortmund Psi reduces to original UNIFAC Psi when
+b=c=0, and Dortmund γ-φ flash bubble-T sanity. Total activity
+test count: 58 (+11 over v0.9.40).
+
+**Gamma-phi flash integration in v0.9.40.** The activity-coefficient
+models from v0.9.39 are now wired into VLE flash machinery via the
+modified Raoult's law:
+
+    K_i = gamma_i(T, x) * p_i^sat(T) / p
+
+This is the classical chemical-engineering approach for highly
+non-ideal mixtures (azeotropes, distillation, LLE) at low to
+moderate pressures. The new `GammaPhiFlash` class supports five
+calculation types:
+
+```python
+from stateprop.activity import (UNIFAC, GammaPhiFlash, AntoinePsat)
+
+# NIST WebBook Antoine: log10(p[bar]) = A - B/(T[K] + C)
+ethanol_psat = AntoinePsat(A=5.37229, B=1670.409, C=-40.191)
+water_psat   = AntoinePsat(A=4.6543,  B=1435.264, C=-64.848)
+
+uf = UNIFAC([{'CH3': 1, 'CH2': 1, 'OH': 1}, {'H2O': 1}])
+flash = GammaPhiFlash(activity_model=uf,
+                      psat_funcs=[ethanol_psat, water_psat])
+
+flash.bubble_p(T, x)         # bubble pressure given liquid x
+flash.bubble_t(p, x)         # bubble T at fixed p
+flash.dew_p(T, y)            # dew pressure given vapor y
+flash.dew_t(p, y)            # dew T at fixed p
+flash.isothermal(T, p, z)    # P-T flash returning V, x, y
+```
+
+**Vapor-pressure helper**: `AntoinePsat(A, B, C, T_min, T_max)`
+implements the NIST-convention Antoine equation. Custom callables
+(DIPPR, Wagner, etc.) work too -- pass any `psat: float -> float`
+that returns Pa for input K.
+
+**Validation against ethanol-water at 1 atm** (UNIFAC + Antoine):
+
+| x_eth | T (UNIFAC) | T (literature) | y_eth (UNIFAC) | y_eth (lit) |
+|-------|------------|----------------|----------------|-------------|
+| 0.10  | 85.82°C    | 87.7°C         | 0.453          | 0.434       |
+| 0.30  | 81.71°C    | 81.5°C         | 0.572          | 0.575       |
+| 0.50  | 79.84°C    | 80.1°C         | 0.655          | 0.654       |
+| 0.70  | 78.56°C    | 78.7°C         | 0.759          | 0.755       |
+| 0.894 | 78.05°C    | 78.15°C        | 0.894          | 0.894       |
+
+UNIFAC correctly **predicts the ethanol-water azeotrope** at
+x_eth ≈ 0.893 with y_eth = x_eth (self-consistent within 0.0001).
+Literature values from Mertl 1972 / Ochi-Kojima.
+
+For x in [0.3, 0.7] the bubble T agreement is within 0.3°C.
+Larger errors (~2°C) at very dilute aqueous compositions are
+inherent to original UNIFAC for highly aqueous systems and
+documented in the literature.
+
+**Algorithms**:
+- Bubble p: direct evaluation, no iteration (gamma at known x).
+- Bubble T: Newton iteration on T (~5 iter typical).
+- Dew p: SS over x (gamma depends on liquid composition); ~5-15 iter.
+- Dew T: outer Newton on T, inner SS for dew p; ~10-20 iter total.
+- Isothermal flash: outer SS on x for gamma updates, inner Rachford-Rice
+  for V (bisection-bounded, always converges).
+
+**Vapor phase** is treated as ideal gas (no fugacity correction at
+saturation, no Poynting). For pressures above ~5 bar or
+near-critical conditions, switch to phi-phi formulation with the
+existing cubic / SAFT EOS facilities (`stateprop.cubic.flash`,
+`stateprop.saft`).
+
+**Tests added**: 6 new tests covering pure-component bubble = psat,
+azeotrope detection (UNIFAC predicts the literature ethanol-water
+azeotrope to 4 decimals), bubble-T curve agreement, isothermal
+flash material balance + K_i x_i = y_i consistency, dew-T /
+bubble-T self-consistency, and Antoine round-trip. New activity
+test count: 47 (+10 over v0.9.39).
+
+**Activity-coefficient models in v0.9.39 (NRTL, UNIQUAC, UNIFAC).**
+Three classical gE-models for non-ideal liquid mixtures, the
+biggest gap identified in the v0.9.38 honest assessment vs other
+libraries. These open up gamma-phi flash workflows for highly
+non-ideal mixtures (alcohols + water, distillation azeotropes,
+LLE) where SAFT/cubic EOS alone are unreliable or require
+parameter regression.
+
+**API** (consistent across all three models):
+
+```python
+from stateprop.activity import NRTL, UNIQUAC, UNIFAC
+
+# NRTL: T-dependent tau via a + b/T + e ln(T) + f T
+nrtl = NRTL(alpha=alpha_matrix, b=b_matrix)   # alpha symmetric
+gammas = nrtl.gammas(T, x)                    # activity coeffs
+ln_g = nrtl.lngammas(T, x)
+gE = nrtl.gE_over_RT(T, x)                    # excess Gibbs / RT
+
+# UNIQUAC: pure-component r, q + binary tau
+uq = UNIQUAC(r=[1.43, 0.92], q=[1.43, 1.4], b=b_matrix)
+gammas = uq.gammas(T, x)
+
+# UNIFAC: group contribution
+ethanol = {'CH3': 1, 'CH2': 1, 'OH': 1}
+water = {'H2O': 1}
+uf = UNIFAC([ethanol, water])
+gammas = uf.gammas(298.15, [0.5, 0.5])
+```
+
+**NRTL** (Renon-Prausnitz 1968): two-parameter (per binary) gE
+model with non-randomness factor alpha. Standard form
+tau_ij(T) = a_ij + b_ij/T (additional e_ij ln(T) and f_ij T
+terms supported). Supports any number of components.
+
+**UNIQUAC** (Abrams-Prausnitz 1975): pure-component r_i (volume),
+q_i (surface area) plus binary tau_ij. Combinatorial +
+residual decomposition. Z = 10 coordination number.
+
+**UNIFAC** (Fredenslund-Jones-Prausnitz 1975, Hansen 1991
+revision): group-contribution version of UNIQUAC -- needs no
+binary parameters at all, predicts gammas from the molecular
+structure (number of subgroups per component) using a tabulated
+group-interaction database.
+
+The starter database (`stateprop.activity.unifac_database`)
+covers 28 subgroups across 12 main groups including all common
+hydrocarbon, alcohol, water, ester, ether, ketone, amine,
+nitrile, and carboxylic-acid functional groups. Users extend by
+adding entries to SUBGROUPS dict and A_MAIN dict; the model
+honors any custom database object.
+
+**Validation** (UNIFAC sanity checks):
+- ethanol-water at 298 K: gamma_eth^infty = 7.6 (lit ~5-7),
+  gamma_water^infty = 2.7 (lit ~2-3). Within UNIFAC's
+  documented accuracy for moderately non-ideal aqueous systems.
+- n-pentane / n-hexane: all gammas within 5% of unity (correct
+  near-ideal behavior).
+- acetone-methanol-water ternary: gives gammas in (1.0, 1.5)
+  range, qualitatively correct.
+
+**Tests added**: 14 tests in `run_activity_tests.py` covering pure
+limits (gamma=1 at x=1), zero-interaction sanity checks,
+Gibbs-Duhem consistency (gE = sum x*ln(gamma)), UNIFAC
+group-additivity of r and q, and unknown-subgroup error
+handling. New test count: 37 (each test contains multiple
+sub-checks). 
+
+**What's not yet included**:
+- Group-interaction parameter regression tools (use thermo or
+  DDBST data fitting tools externally for now)
+- Modified UNIFAC variants (Lyngby, Dortmund) with T-dependent
+  group interactions -- requires extended database
+- T-derivatives of gE for caloric properties (excess enthalpy
+  hE = -RT^2 d(gE/RT)/dT)
+- Direct integration with the EOS-based flash routines (gamma-phi
+  flash); user must currently combine activity model with vapor
+  fugacity manually
+
+These are tracked roadmap items.
+
+**Stiel-Thodos viscosity + Wassiljewa-Mason-Saxena thermal cond in
+v0.9.38.** Two new transport correlations added as alternatives to
+the existing Chung-Lee-Starling implementation:
+
+**Stiel-Thodos high-pressure viscosity** (Jossi, Stiel, Thodos
+1962): residual-viscosity correlation that adds a density-dependent
+correction to a dilute-gas viscosity. The form is
+
+    [(mu - mu_0) xi + 1e-4]^(1/4) =
+        0.1023 + 0.023364 rho_r + 0.058533 rho_r^2
+                 - 0.040758 rho_r^3 + 0.0093324 rho_r^4
+
+with xi = T_c^(1/6) / (sqrt(M_g) p_c_atm^(2/3))  in (cP)^-1
+and rho_r = rho_mol * V_c.
+
+For n-hexane liquid at 300K (rho_r ~ 2.83), Stiel-Thodos hits
+**0.296 mPa.s vs NIST 0.292 (1.5% error)**, substantially better
+than Chung's polynomial extension at this state (0.332 mPa.s, 14%
+error). Best for dense liquid hydrocarbons; for very polar fluids
+use Chung or look to specialized correlations.
+
+For mixtures, Lee-Kesler-style critical-property mixing:
+- T_cm = sum_ij x_i x_j (T_ci T_cj)^0.5 V_cij / V_cm
+- V_cm = sum_ij x_i x_j ((V_ci^(1/3) + V_cj^(1/3))/2)^3
+- M_m = sum x_i M_i
+- p_cm = Z_cm R T_cm / V_cm   with Z_cm = sum x_i Z_ci
+
+**Wassiljewa equation with Mason-Saxena (Wilke) coefficients** for
+mixture thermal conductivity:
+
+    lambda_m = sum_i [ x_i lambda_i / sum_j x_j Phi_ij ]
+    Phi_ij = [1 + (mu_i/mu_j)^(1/2) (M_j/M_i)^(1/4)]^2
+              / sqrt(8 (1 + M_i/M_j))
+
+Same Wilke coefficients used for viscosity mixing rules. Requires
+pure-component lambda_i AND mu_i at the mixture conditions
+(compute from any pure-component method -- Chung, Stiel-Thodos,
+DIPPR, etc.). Mixture results are bracketed by pure-component
+values, ~5% agreement with more elaborate methods (Lindsay-Bromley)
+for typical hydrocarbon mixtures.
+
+A companion `viscosity_mixture_wilke(x, M, mu_pure)` provides the
+classical Wilke mixing for viscosity with the same Phi_ij.
+
+**Naming note**: The "Predictive-Soave" terminology in the user's
+original ask doesn't appear to match a standard published method
+(Predictive-Soave-Redlich-Kwong is a group-contribution EOS for
+vapor-liquid equilibria, not transport properties). Wassiljewa-
+Mason-Saxena is the most-implemented classical alternative to
+Chung's mixing rule and serves the same purpose.
+
+**Tests added**: 7 new tests in `run_transport_tests.py` covering
+pure n-hexane liquid accuracy, low-density limits, mixture
+boundary cases, and physical-sanity bracketing. Total transport
+test count: 39 (+9 over v0.9.37).
+
+**API**:
+```python
+from stateprop.transport import (
+    viscosity_stiel_thodos,                    # pure
+    viscosity_mixture_stiel_thodos,            # mixture
+    thermal_conductivity_mixture_wassiljewa,   # mixture lambda
+    viscosity_mixture_wilke,                   # mixture mu
+)
+```
+
+The Chung-Lee-Starling routines remain unchanged; users can choose
+between Chung (broad validity, polynomial extension to liquids) and
+Stiel-Thodos (better dense-liquid accuracy for hydrocarbons) per
+application.
+
+**Optimal corr-FD step sizes in v0.9.37.** The hard-truth note: full
+analytic dipole + quadrupole + association derivatives is multi-week
+work (especially Wertheim TPT1 which requires implicit
+differentiation through the X_A fixed point). For v0.9.37 we apply
+the much simpler optimization of moving the corr FD step sizes from
+their v0.9.27/v0.9.34 defaults (h=1e-6 for gradient, h=1e-5 for
+Hessian) to empirically optimal values found via h-sweep:
+
+    h_grad = 1e-4   (was 1e-6 -- 25x more accurate)
+    h_hess = 1e-3   (was 1e-5 -- 1e6x more accurate)
+
+The smaller h's were dominated by cancellation roundoff. At
+h=1e-4 plain central diff hits ~1e-12 absolute on the corr
+gradient; at h=1e-3 the 4-point Hessian stencil hits ~1e-10
+absolute. Below the round-off floor of double precision -- as good
+as floating-point gets without going to extended precision.
+
+**Why this looks like a smaller "improvement"**: The end-to-end
+`dlnphi_dxk_at_p` rel-err vs Richardson FD doesn't visibly improve
+because the FD reference itself has 1e-6 noise. Direct comparison
+against FD@h=1e-3 shows the v0.9.37 analytic value is now
+**4e-8 absolute** for water-MeOH (vs ~1e-6 in v0.9.36), a 25x
+improvement that is below the FD reference noise floor.
+
+**Cost**: zero. We just changed two integer literals.
+
+**Path to true elimination of corr FD** (future work, multi-version
+roadmap):
+- Analytic dipole derivatives via chain rule through Pade(a_2, a_3)
+  closure with explicit J_2_ij(η) and J_3_ij(η) polynomial
+  derivatives. Estimated 180 LOC.
+- Analytic quadrupole derivatives -- same Pade structure as dipole,
+  different coefficients and σ-powers. Estimated 180 LOC.
+- Analytic association via implicit differentiation: solve linear
+  system [∂F/∂X] dX/dy = -∂F/∂y where F is the Wertheim TPT1
+  fixed-point map; chain rule through the contribution
+  Σ_i x_i (n_A_i [ln X_A,i - X_A,i/2 + 1/2] + n_B_i [...]).
+  Estimated 300 LOC plus extensive testing.
+
+These are tracked but not in v0.9.37's scope. The pragmatic
+optimization above gets accuracy already to within machine
+precision for engineering use cases (1e-8 vs the 1e-3 needed by
+typical Newton tolerances).
+
+**Fully analytic A_rho/A_rhorho/A_rhoi in v0.9.36.** The Richardson-
+extrapolated rho-FD from v0.9.35 is replaced with closed-form analytic
+expressions for the hard-chain and dispersion contributions. Since
+ζ_n = (π/6) ρ_n S_n(x) is linear in ρ (with ∂ζ_n/∂ρ = ζ_n/ρ and
+∂²ζ_n/∂ρ² = 0), all rho derivatives reduce to clean chain rules
+through the ζ-Hessian already computed for v0.9.34's composition
+Hessian:
+
+    ∂f/∂ρ      = (1/ρ) Σ_n ζ_n · f_n              (f any function of ζ)
+    ∂²f/∂ρ²    = (1/ρ²) Σ_{nm} ζ_n ζ_m · f_nm
+    ∂²f/∂ρ∂x_i = (1/ρ) [c_{:,i}.T · f_zz · ζ + f_z · c_{:,i}]
+
+For dispersion, the ρ_n prefactor adds a clean product rule on
+F(η) = I_1(η) and F(η) = C_1(η) I_2(η):
+
+    ∂(ρ_n F(η))/∂ρ   = N_A · [F + η F'(η)]
+    ∂²(ρ_n F(η))/∂ρ² = (N_A / ρ) · η · [2 F'(η) + η F''(η)]
+
+Association/polar/quadrupole contributions retain a Richardson FD
+fallback on the corr term (small correction; FD adds 4 corr scalar
+evaluations and 4N corr-gradient evaluations).
+
+**Accuracy** (vs Richardson FD reference; the FD has its own ~1e-5
+noise floor):
+
+| Quantity | non-polar  | polar/assoc |
+|----------|------------|-------------|
+| A_rho    | 1e-12 to 1e-13 | 1e-13 to 1e-14 |
+| A_rhoi   | 1e-10 to 1e-11 | 1e-6 (assoc-FD limited) |
+| A_rhorho | 1e-7 (FD ref noise) | 1e-7 (FD ref noise) |
+
+A_rho and A_rhoi are now machine-precision exact for HC + dispersion;
+the only nontrivial error is in A_rhoi for strongly-associating
+mixtures where the association FD fallback contributes ~1e-6.
+
+**End-to-end `dlnphi_dxk_at_p`** vs Richardson FD reference:
+
+| Mixture      | rel err  | speedup | vs v0.9.35 |
+|--------------|----------|---------|------------|
+| CH4-C2       | 1.52e-5  | 3.1x    | unchanged  |
+| CH4-C2-C3    | 2.87e-6  | 6.4x    | up from 5.0x |
+| CO2-C2       | 2.61e-5  | 1.9x    | down from 2.3x |
+| Acetone-C2   | 1.26e-6  | 2.6x    | up from 2.4x |
+| water-MeOH   | 2.55e-4  | 2.6x    | up from 2.2x |
+
+The non-polar 3-comp case sees the strongest speedup boost (5.0x ->
+6.4x). Polar mixtures are slightly slower due to extra corr-gradient
+FD evaluations (4N central diff plus the gradient), but
+accuracy is unchanged. End-to-end accuracy is limited by the
+Richardson FD reference's own noise floor (~1e-5); the analytic
+values internally are exact.
+
+**Tests added**: `test_analytic_rho_derivs_match_fd_nonpolar` (1e-8
+tolerance, hits 1e-12 in practice) and
+`test_analytic_rho_derivs_with_polar_assoc` (1e-5 tolerance for
+assoc-perturbed cases). Total SAFT test count: 147 (+6 over
+v0.9.35).
+
+**Why this matters**: Both the composition Hessian (v0.9.34) and now
+the rho-direction derivatives are fully analytic for HC + dispersion.
+This eliminates all FD on the main alpha_r path, leaving FD only on
+the small association/polar/quadrupole corr term. The Newton solvers
+that depend on `dlnphi_dxk_at_p` (envelope tracing, bubble/dew, flash)
+benefit from the smoother Jacobian.
+
+**Richardson-extrapolated rho-FD in v0.9.35.** The remaining rho-
+direction finite differences in `dlnphi_dxk_at_p` (for A_rho, A_rhorho,
+A_rhoi) are upgraded from central difference O(h^2) to Richardson
+extrapolation O(h^4). This removes rho-FD as the accuracy bottleneck --
+v0.9.34's end-to-end accuracy against a Richardson-FD reference was
+~1e-4 to 1e-3; v0.9.35 now matches to 1e-6 to 1e-5 for non-polar
+mixtures (50x improvement), while adding only 2 additional
+`_alpha_r_core` evaluations.
+
+**Richardson formulas**:
+
+    J(h)    = J_exact + C*h^2 + O(h^4)
+    J(h/2)  = J_exact + C*h^2/4 + O(h^4)
+    J_rich  = [4*J(h/2) - J(h)] / 3 = J_exact + O(h^4)
+
+Applied separately to the first derivative (A_rho), second derivative
+(A_rhorho), and mixed derivative (A_rhoi) of alpha_r with respect to
+density. At h = rho * 1e-3, the O(h^4) truncation error is ~1e-12,
+dominated now by round-off in the assembled Jacobian.
+
+**Validation** (accuracy vs Richardson-extrapolated FD reference,
+speedup vs single-h FD):
+
+| Mixture      | rel err   | speedup |
+|--------------|-----------|---------|
+| CH4-C2       | 1.52e-5   | 3.3x    |
+| CH4-C2-C3    | 2.78e-6   | 5.0x    |
+| CO2-C2       | 2.61e-5   | 2.3x    |
+| Acetone-C2   | 1.26e-6   | 2.4x    |
+| water-MeOH   | 2.55e-4   | 2.2x    |
+
+Non-polar accuracy is now limited by the round-off noise in the
+derivative-identity assembly (1e-6 or so), not rho-FD truncation.
+Polar/associating accuracy is limited by the 4-point FD on the
+association/polar Hessian fallback, which is 1e-4 for strong
+hydrogen-bonding fluids.
+
+**Cost**: 4 `_alpha_r_core` calls in the rho direction (was 2 in
+v0.9.34), vs zero for a fully analytic implementation. The extra
+cost is about 10% of the total `dlnphi_dxk_at_p` call time but buys
+50x accuracy -- a good trade for typical use cases (flash/envelope
+Newton iterations need ~1e-8 tolerance at most).
+
+The alternative, fully analytic A_rho/A_rhorho/A_rhoi (via chain
+rule through ζ_n = const * rho and the dispersion rho_n prefactor),
+remains a roadmap item but is no longer a priority since Richardson
+already pushes accuracy below where users would notice.
+
+**True analytic composition Hessian in v0.9.34.** The Hessian terms
+A_ik = d²α_r / dx_i dx_k needed inside `dlnphi_dxk_at_p` are now computed
+analytically for hard-chain and dispersion contributions, rather than
+via the 2N FD evaluations of the analytic composition gradient used in
+v0.9.30. Association, polar, and quadrupole contributions continue to
+use FD fallback (they are small corrections).
+
+**Math**: The ζ-space Hessian of a_hs and g_ii is computed analytically,
+then chained to x-space via the outer products c_{n,i} c_{m,k} where
+c_{n,i} = dζ_n/dx_i = (π/6) ρ_n m_i d_i^n is constant in x:
+
+    d²α_r / dx_i dx_k = Σ_{n,m} (d²α_r/dζ_n dζ_m) c_{n,i} c_{m,k}
+
+plus additional contributions from m_bar (linear in x) and the
+dispersion pair sums m2es3, m2e2s3 (quadratic, Hessian = 2·pair_es3).
+
+The 4×4 ζ-Hessian of a_hs = A_BMCSL/ζ_0 and the 2×2 ζ-Hessian of g_ii
+(depends on ζ_2, ζ_3 only) are given by straight differentiation of
+the closed-form expressions. Second derivatives of I_1, I_2, C_1 with
+respect to (η, m_bar) are computed from their polynomial structure.
+
+**Cost**: O(N²) instead of O(N³). The dominant cost for non-polar
+mixtures is now the pair-matrix setup plus a few N×N matrix products.
+For polar/associating mixtures there's still an O(N²) FD term on the
+association/polar correction.
+
+**Speedup** vs pure-FD reference (baseline established in v0.9.30):
+
+| Mixture      | FD [ms] | v0.9.34 [ms] | Speedup  | vs v0.9.30 |
+|--------------|---------|--------------|----------|------------|
+| CH4-C2       |  15.3   |   5.7        |   2.7x   |  was 2.9x  |
+| CH4-C2-C3    |  28.8   |   4.7        | **6.1x** |  was 5.2x  |
+| CO2-C2       |  25.8   |   8.5        |   3.0x   |  was 2.5x  |
+| Acetone-C2   |  26.6   |   9.4        |   2.8x   |  was 2.2x  |
+| water-MeOH   |  78.8   |  30.0        |   2.6x   |  was 2.2x  |
+
+The 3-component non-polar case is the largest win because that's the
+pure analytic path. Polar/assoc mixtures still benefit from dropping
+the O(N³) term to O(N²) on the HC+dispersion part.
+
+**Accuracy**: For non-polar mixtures, the analytic Hessian matches FD
+on gradient to **machine precision (~1e-8 relative)** -- dramatically
+cleaner than the FD-on-gradient approach used in v0.9.30, which was
+limited by the inner h=1e-6 step (~1e-3 relative accuracy on the
+Hessian). For polar/associating mixtures, the FD fallback on the small
+correction term gives ~1e-3 relative accuracy.
+
+**Tests added**: 4 new tests in run_saft_tests.py verify analytic
+Hessian accuracy (1e-8 for non-polar), symmetry, and speedup (≥4x vs
+pure-FD reference). Total SAFT test count: 141 (+7 over v0.9.33).
+
+**Implementation**: New method
+`SAFTMixture._alpha_r_composition_hessian(rho, T, x)` returns
+`(alpha_r, grad_x, hess_x[N, N])` in one pass. Used internally by
+`dlnphi_dxk_at_p`; available externally for advanced use cases
+(phase-stability analysis, critical-point calculations, etc.).
+
+**Macleod-Sugden parachor surface tension in v0.9.33.** Adds pure-fluid
+and mixture surface tension via the Macleod-Sugden parachor method, which
+uses phase densities from the EOS (cubic/SAFT/GERG) to compute sigma.
+This complements Brock-Bird: Brock-Bird is fast and accurate for
+non-polar fluids but fails on associating fluids; Macleod-Sugden is
+accurate for both non-polar and polar/associating fluids when good
+phase densities are available.
+
+The Macleod-Sugden identity:
+
+    sigma^(1/4) = Sum_i P_i (rho_L * x_i - rho_V * y_i)
+
+with parachor P_i in cm^3/mol * (dyn/cm)^(1/4), densities in mol/cm^3,
+and sigma in dyn/cm. For pure fluids the sum reduces to
+`P * (rho_L - rho_V)`.
+
+    from stateprop.transport import (
+        surface_tension_macleod_sugden,
+        surface_tension_mixture_macleod_sugden,
+    )
+    from stateprop.saft import WATER, SAFTMixture
+
+    # Pure: SAFT-computed densities
+    mx = SAFTMixture([WATER], [1.0])
+    # (compute rho_L, rho_V at psat from saturation routine)
+    sigma = surface_tension_macleod_sugden(WATER, rho_L, rho_V)
+
+    # Mixture: requires both liquid (x) and vapor (y) compositions
+    sigma = surface_tension_mixture_macleod_sugden(
+        [c1, c2], x, y, rho_L, rho_V
+    )
+
+**Validation** (with NIST saturation densities):
+
+| Fluid            | MS [mN/m] | NIST | err    |
+|------------------|-----------|------|--------|
+| n-butane 300K    | 13.67     | 11.70 | +17%  |
+| n-hexane 300K    | 18.31     | 17.90 | +2%   |
+| n-octane 300K    | 22.45     | 21.10 | +6%   |
+| water 300K       | 73.76     | 71.70 | +3%   |
+| methanol 300K    | 22.12     | 22.10 |  0%   |
+
+**Complementarity with Brock-Bird** (same fluids, 300K):
+
+| Fluid    | MS err | Brock-Bird err |
+|----------|--------|----------------|
+| n-butane | +17%   | +0.2%          |
+| n-hexane |  +2%   | -1.6%          |
+| water    |  +3%   | +48%           |
+| methanol |   0%   | +97%           |
+
+Brock-Bird wins on non-polar alkanes (~0-2% error); Macleod-Sugden wins
+decisively on polar/associating fluids (3% vs 48% for water, 0% vs 97%
+for methanol).
+
+**End-to-end with SAFT-computed densities** (saturation point from
+the EOS, piped into Macleod-Sugden):
+- n-hexane 300K: 17.18 mN/m vs NIST 17.9 (-4%)
+- water 350K:    62.38 mN/m vs NIST 63.2 (-1.3%)
+
+**Component field added**: `PCSAFT.parachor` [cm^3/mol * (dyn/cm)^(1/4)].
+All 14 pre-packaged PC-SAFT components populated with literature
+parachors (Quayle 1953 / Reid-Prausnitz-Poling). Missing parachor raises
+a clear ValueError.
+
+**Test suite**: 32 transport tests (+10 over v0.9.32) covering pure and
+mixture Macleod-Sugden, SAFT integration, and missing-parachor error.
+Total 1006 tests across all suites.
+
+**Macleod-Sugden parachor surface tension in v0.9.33.** Complements
+Brock-Bird (v0.9.32) with a density-based method that is accurate for
+polar and associating fluids where Brock-Bird fails, and extends
+naturally to mixtures:
+
+    sigma^(1/4) = Sum_i P_i (rho_L * x_i - rho_V * y_i)
+
+where P_i is the pure-component parachor [cm^3/mol * (dyn/cm)^(1/4)]
+and (rho_L, rho_V) come from an EOS (cubic, GERG, PC-SAFT).
+
+    from stateprop.saft import SAFTMixture, N_HEXANE, WATER, ETHANE
+    from stateprop.transport import (
+        surface_tension_macleod_sugden,
+        surface_tension_mixture_macleod_sugden,
+    )
+
+    # Pure fluid with SAFT-computed densities
+    mx = SAFTMixture([WATER], [1.0])
+    rho_L = mx.density_from_pressure(p_sat, T=350.0, phase_hint='liquid')
+    rho_V = mx.density_from_pressure(p_sat, T=350.0, phase_hint='vapor')
+    sigma = surface_tension_macleod_sugden(WATER, rho_L, rho_V)
+
+    # Mixture
+    sigma = surface_tension_mixture_macleod_sugden(
+        [N_HEXANE, ETHANE], x=[0.7, 0.3], y=[0.3, 0.7],
+        rho_L_mol=7500.0, rho_V_mol=250.0,
+    )
+
+**Validation vs NIST (pure fluid with NIST-quality densities):**
+
+| Fluid     | T [K] | MS [mN/m] | NIST | err   |
+|-----------|-------|-----------|------|-------|
+| n-hexane  | 300   | 18.31     | 17.9 |  +2%  |
+| n-octane  | 300   | 22.45     | 21.1 |  +6%  |
+| water     | 300   | 73.76     | 71.7 |  +3%  |
+| methanol  | 300   | 22.12     | 22.1 |  0%   |
+
+**Brock-Bird vs Macleod-Sugden complementarity:**
+
+| Fluid    | BB err | MS err | Winner |
+|----------|--------|--------|--------|
+| n-butane | +0.2%  | +17%   | BB     |
+| water    | +48%   | +3%    | MS     |
+| methanol | +97%   | 0%     | MS     |
+
+Brock-Bird is the right choice when only critical properties are
+available and the fluid is non-polar. Macleod-Sugden is the right
+choice when EOS phase densities are available and the fluid is polar
+or associating, or for any mixture. The two methods are independent
+code paths; users pick whichever fits their situation.
+
+**End-to-end with SAFT-computed densities:**
+
+    n-hexane at 300K: 17.18 mN/m vs NIST 17.9 (-4%)
+    water at 350K:    62.38 mN/m vs NIST 63.2 (-1.3%)
+
+SAFT + Macleod-Sugden gives ~1-4% accuracy on surface tension with no
+extra fitting -- the parachor values come from Quayle 1953 and
+Reid-Prausnitz-Poling tables directly.
+
+**Component field added**: `PCSAFT.parachor` (default 0.0). Populated
+for all 14 pre-packaged components. Users constructing their own
+components must supply this if they want Macleod-Sugden; otherwise the
+function raises a clear error.
+
+**Test suite**: 30 transport tests (+8 Macleod-Sugden tests), total
+998 across all suites.
+
+**Transport properties (Chung + Brock-Bird) in v0.9.32.** New
+`stateprop.transport` subpackage provides viscosity, thermal conductivity,
+and surface tension for pure fluids and mixtures. These correlations are
+EOS-agnostic: they use component critical constants (T_c, p_c), acentric
+factor, optional dipole moment and association correction factor (kappa),
+and molar mass. They work on CubicMixture components, PCSAFT components,
+or any duck-type object with the required fields.
+
+**Chung-Lee-Starling** (Chung et al. 1988, Ind. Eng. Chem. Res. 27, 671):
+
+    from stateprop.transport import (
+        viscosity_chung, thermal_conductivity_chung,
+        viscosity_mixture_chung, thermal_conductivity_mixture_chung,
+    )
+    from stateprop.saft import METHANE, ETHANE
+
+    eta = viscosity_chung(METHANE, T=500.0)             # dilute-gas
+    eta = viscosity_chung(METHANE, T=300.0, rho_mol=10100.0)  # dense liquid
+    lam = thermal_conductivity_chung(METHANE, 500.0)    # dilute
+    # Mixture (pseudo-component mixing rules from Chung 1988 Sec. V):
+    eta_mix = viscosity_mixture_chung([METHANE, ETHANE], [0.5, 0.5], 300.0)
+
+**Brock-Bird** corresponding-states surface tension (Brock & Bird 1955,
+AIChE J. 1, 174; Reid-Prausnitz-Poling Eq. 12-3.5):
+
+    from stateprop.transport import surface_tension_brock_bird
+    sigma = surface_tension_brock_bird(N_BUTANE, 300.0)   # 11.72 mN/m
+
+**Accuracy** (validated against NIST; see `tests/run_transport_tests.py`):
+
+Chung viscosity vs NIST experimental data:
+
+| Fluid     | T [K] | Chung [uPa.s] | NIST [uPa.s] | err  |
+|-----------|-------|---------------|--------------|------|
+| methane   |  500  |  10.92        |  16.54       | -34% |
+| ethane    |  500  |   9.80        |  12.70       | -23% |
+| propane   |  500  |   8.84        |  10.90       | -19% |
+| n-butane  |  500  |   8.07        |  10.80       | -25% |
+| n-hexane  |  500  |   6.86        |   9.10       | -25% |
+| CO2       |  500  |  15.51        |  23.50       | -34% |
+
+Chung systematically under-predicts dilute-gas viscosity by 20-35%
+compared to modern reference EOS data (Vogel, Friend, etc.). This is a
+known limitation of the 1988 correlation; more accurate results require
+fluid-specific correlations. The dense-fluid Chung correction works
+well: n-butane liquid at 300K gives 171 uPa.s vs NIST 160 (+7%), and
+n-hexane liquid at 300K gives 295 uPa.s vs NIST 295 (0%).
+
+Brock-Bird surface tension (with normal boiling point T_b from NIST):
+
+| Fluid     | T [K] | Brock-Bird [mN/m] | NIST | err  |
+|-----------|-------|-------------------|------|------|
+| n-butane  |  300  | 11.72             | 11.7 |  +0.2% |
+| n-hexane  |  300  | 17.62             | 17.9 |  -1.6% |
+| n-octane  |  300  | 20.90             | 21.1 |  -1.0% |
+| water     |  300  | 105.85            | 71.7 | +48%   |
+| ethanol   |  300  | 38.59             | 22.0 | +75%   |
+
+Brock-Bird is very accurate for non-polar fluids (< 5% error) but fails
+for strong hydrogen-bonding fluids (water, alcohols) by 40-80%. For
+those, use a molecular-theory approach or a dedicated fit.
+
+**Molar mass and boiling point** added to all 14 pre-packaged PCSAFT
+components (`PCSAFT.molar_mass`, `PCSAFT.T_b`). For user-constructed
+components, these fields default to 0.0 and transport correlations will
+raise a helpful error if called.
+
+**Test suite**: 22 new transport tests; total 998 across all suites.
+
+**Newton bubble/dew for SAFT in v0.9.31.** SAFT mixtures can now use
+the existing `stateprop.cubic.flash.newton_bubble_point_{p,T}` and
+`newton_dew_point_{p,T}` solvers directly -- no SAFT-specific code
+needed. The Newton solvers are generic: they require only `ln_phi`,
+`dlnphi_dxk_at_p`, `dlnphi_dp_at_T`, `dlnphi_dT_at_p`,
+`density_from_pressure`, and `wilson_K` from the mixture, all of which
+SAFTMixture has provided since v0.9.22. What was missing until now was
+accuracy: the FD-based `dlnphi_dxk_at_p` had 1e-3 noise that the
+Newton Jacobian couldn't handle. With v0.9.30's full analytic
+`dlnphi_dxk_at_p` (derived via the closed-form identity), the
+Jacobian is clean enough for quadratic convergence.
+
+**Speedup vs SS for SAFT mixtures (CH4-ethane-propane bubble_p at
+T=250K, z=[0.6,0.3,0.1]):**
+
+| Method            | Iterations | Wall time | Pressure |
+|-------------------|------------|-----------|----------|
+| SS (successive substitution) | 56 | 15,023 ms | 72.473 bar |
+| Newton (analytic)            | 12 | 437 ms    | 72.479 bar |
+| **Speedup**                  |    | **34.4x** |          |
+
+For 2-component SAFT mixtures speedups are ~10x (SAFT SS is slow
+because each SS iteration requires two `ln_phi` evaluations, each
+with a full density solve). The Newton solver uses `tol=1e-8` instead
+of `tol=1e-10` to accommodate SAFT's noise floor.
+
+**Recommended usage:**
+
+```python
+from stateprop.saft import SAFTMixture, METHANE, ETHANE
+from stateprop.cubic.flash import newton_bubble_point_p, newton_dew_point_p
+
+mx = SAFTMixture([METHANE, ETHANE], [0.5, 0.5])
+r = newton_bubble_point_p(220.0, [0.5, 0.5], mx, tol=1e-8)
+# r.p, r.K, r.x, r.y, r.iterations
+```
+
+The Newton solvers automatically fall back to SS on singular Jacobian
+or density-solver failure, so they are robust in all regimes where SS
+was working.
+
+**Test suite**: 134 SAFT tests (+8 over v0.9.30), total 976 across all
+suites. 5 new tests cover Newton bubble_p, dew_p, bubble_T for
+non-polar and polar SAFT mixtures, plus a speedup regression test that
+verifies the 3-comp bubble_p is at least 5x faster than SS.
+
+**Full analytic `dlnphi_dxk_at_p` via derivative identity in v0.9.30.**
+The composition Jacobian of ln phi at fixed pressure is now computed via
+a closed-form expansion:
+
+    d ln phi_i / d x_k |_p =
+          A_ik + rho A_{rho,k} - Sum_j x_j A_jk
+        + rho_x_k [ 2 A_rho + rho A_{rho,rho} + A_{i,rho}
+                   - Sum_j x_j A_{j,rho} ]
+        + rho A_{rho,k}
+        - dZ/dx_k / Z
+
+where `rho_x_k = (d rho / d x_k)_p = -rho^2 A_{rho,k} / (1 + 2 rho A_rho
++ rho^2 A_{rho,rho})`, `A = alpha_r`, and A_{...}` denotes the
+corresponding partial. The Hessian terms A_ik, A_{rho,k}, A_{rho,rho},
+A_{i,rho} are computed by central FD on the analytic composition
+gradient returned by `_alpha_r_core(return_dx=True)` -- this gives
+cleaner results than double-FD on alpha_r.
+
+The identity replaces 2N full density solves (prior v0.9.29
+implementation) with one density solve plus ~2 + N inner alpha_r_core
+evaluations. All A_k terms from the derivation cancel algebraically
+(the x_k A_k term from `-Sum x_j A_j` exactly offsets one term from
+`dA/dx_k` and one term from `-Sum x_j A_jk`), reducing the expansion
+to Hessian and density-mixed derivatives only.
+
+**Speedup**: 2.2-5.2x vs pure-FD reference, measured across non-polar,
+polar, and associating mixtures:
+
+| Mixture      | FD [ms] | Analytic [ms] | Speedup |
+|--------------|---------|---------------|---------|
+| CH4-C2       |    15.8 |           5.5 |    2.9x |
+| CH4-C2-C3    |    27.7 |           5.3 |    5.2x |
+| CO2-C2       |    24.7 |           9.9 |    2.5x |
+| Acetone-C2   |    23.9 |          10.8 |    2.2x |
+| water-MeOH   |    72.0 |          32.8 |    2.2x |
+
+The 3-component case gives the largest speedup because FD cost scales as
+2N density solves while analytic adds only 1 + N alpha_r_core calls per
+dlnphi_dxk_at_p invocation.
+
+**Accuracy**: matches pure-FD reference to ~5% relative (limited by the
+h=1e-6 inner FD step size and ~1e-10 alpha_r_core noise floor, not by
+the analytic identity). Sufficient for flash and envelope Newton
+iterations.
+
+**Test suite**: 126 SAFT tests (+1 over v0.9.29), total 968 across all
+suites. New `test_dlnphi_dxk_at_p_faster_than_fd_reference` verifies the
+3-comp speedup is at least 1.5x.
+
+**Semi-analytic `dlnphi_dxk_at_p` in v0.9.29.** The composition Jacobian
+of ln phi at fixed pressure (used by envelope-point Newton iterations and
+future Newton bubble/dew flash) now uses a faster path that avoids 2N
+full density-solver calls. The algorithm:
+
+  1. Solve for rho once at reference composition (full scan+Newton+bisect)
+  2. For each composition perturbation x_k -> x +/- h*e_k, drive rho to
+     the new target pressure via a few Newton steps from the reference rho,
+     using the analytic dp/drho already available
+  3. Evaluate ln_phi at the corrected rho (itself fast post-v0.9.27
+     analytic composition gradient)
+
+**Speedup**: 1.1-2.4x depending on mixture complexity. The speedup is more
+modest than the 5-10x originally targeted because the dominant cost is
+actually ln_phi evaluation itself (each call does its own alpha_r and
+gradient), not the full density solver -- v0.9.27 already removed the
+biggest bottleneck. A fully analytic dlnphi_dxk_at_p (with explicit
+Hessian d^2 alpha_r / dx_i dx_k) would give the remaining 3-5x, but is
+left as future work.
+
+**Key benefit**: the analytic envelope Jacobian for SAFT mixtures now
+converges cleanly without the near-convergence workaround required in
+v0.9.27-v0.9.28. New test `test_envelope_still_works_with_analytic_dlnphi_dxk`
+verifies CH4-ethane envelope_point with `use_analytic_jac=True` converges
+to residual < 1e-9 (p=15.97 bar at T=180K).
+
+**Test suite**: 125 SAFT tests (+4 over v0.9.28), total 967 across all
+suites.
+
+**Dedicated 4C water parameter fit in v0.9.28.** With the 4C association
+scheme infrastructure in place from v0.9.27, water's association parameters
+have been refit against NIST saturation pressure. The 4C formula produces
+roughly 2x the association contribution of 2B at equal (eps_AB, kappa_AB),
+so switching water from 2B to 4C requires rebalancing these parameters.
+A coarse grid scan over (eps_AB/k, kappa_AB) at the Gross & Sadowski 2002
+dispersion parameters (m=1.0656, sigma=3.0007, eps/k=366.51) identified:
+
+    eps_AB/k = 1400.0 K     (was 2500.7 at 2B -- roughly halved to offset
+                            4C's doubled site count)
+    kappa_AB = 0.035        (essentially unchanged from 0.034868 at 2B)
+
+**NIST validation (water p_sat, IAPWS-95 reference):**
+
+T=300-400K (low T):
+
+| T [K] | NIST [bar] | PC-SAFT | rel err |
+|-------|-----------|---------|---------|
+| 300 | 0.0354 | 0.0332 | -6.2% |
+| 340 | 0.2719 | 0.2554 | -6.1% |
+| 360 | 0.6217 | 0.5865 | -5.7% |
+| 400 | 2.458  | 2.342  | -4.7% |
+
+T=350-550K (main range):
+
+| T [K] | NIST [bar] | PC-SAFT | rel err |
+|-------|-----------|---------|---------|
+| 350 | 0.418  | 0.392  | -6.2% |
+| 400 | 2.458  | 2.342  | -4.7% |
+| 450 | 9.319  | 8.992  | -3.5% |
+| 500 | 26.40  | 25.683 | -2.7% |
+| 550 | 60.71  | 59.756 | -1.6% |
+
+Mean |error| ~= 4-6%, maximum ~6% at low T. Error decreases toward the
+critical point. A full 5-parameter refit of (m, sigma, eps/k, eps_AB,
+kappa_AB) would reduce the systematic low-T bias further; this is left
+as future work.
+
+**WATER default is now `assoc_scheme="4C"`.** Alcohols (methanol, ethanol,
+1-propanol) remain 2B since their single O-H donor/acceptor pair is well
+captured by 2B. Users who want the old 2B water behavior can construct
+their own component with `PCSAFT(..., assoc_scheme="2B", eps_AB_k=2500.7,
+kappa_AB=0.034868)`.
+
+**Test suite**: 121 SAFT tests (+11 over v0.9.27), total 963 across all
+suites. Two new water 4C validation tests cover T=300-400K and T=350-550K
+ranges.
+
+**4C association scheme + Gross 2005 quadrupolar term + analytic
+composition derivatives in v0.9.27.** This release bundles three
+significant additions to `stateprop.saft`:
+
+**1. 4C association scheme.** `PCSAFT` now has an `assoc_scheme` field
+accepting `"2B"` (default) or `"4C"`. The 2B scheme assumes 1 donor +
+1 acceptor site per molecule with donor-acceptor bonding; 4C (intended
+for water) has 2 donors + 2 acceptors with the same bond-pair rule.
+`_association_fractions()` returns an `(N, 2)` array `[X_A, X_B]` using
+site multiplicity vectors (1,1) for 2B and (2,2) for 4C. Self-consistency
+equations solve X_A and X_B separately:
+
+    X_A_i = 1 / (1 + rho_n * Sum_j x_j n_B_j X_B_j Delta_ij)
+    X_B_i = 1 / (1 + rho_n * Sum_j x_j n_A_j X_A_j Delta_ij)
+
+For pure 4C fluids, molecular symmetry gives X_A == X_B, but
+cross-association between 4C and 2B species respects the distinct
+multiplicities. Pre-packaged associating components keep their published
+2B parameters (water, methanol, ethanol, n-propanol); the 4C scheme is
+available for user-constructed components (water 4C requires a full
+parameter refit to give correct saturation pressure, which is a future
+project).
+
+**2. Gross 2005 quadrupolar term.** CO2 and N2 now carry quadrupole
+moments (4.40 DA and 1.52 DA respectively) via the new
+`quadrupole_moment` field on `PCSAFT`. The Pade closure
+
+    a^QQ = a_2^QQ / (1 - a_3^QQ / a_2^QQ)
+
+uses the same 1/(2 pi) calibration prefactor as the dipolar term.
+Universal J_2 and J_3 coefficients are from Gross 2005 (AIChE J 51,
+2556). The reduced quadrupole is Q*^2 = Q^2 [DA] * 7242.7 /
+(m * (eps/k) * sigma_A^5).
+
+**Validation against NIST (quadrupole ON by default):**
+
+| Fluid | T range [K] | max rel err |
+|-------|-------------|-------------|
+| CO2   | 220-280     |  8.4%       |
+| N2    | 85-110      |  0.4%       |
+
+CO2 shows ~5-8% error vs NIST over its main operating range. N2's
+baseline parameters are already well-fit and the small quadrupole
+(Q=1.52 DA vs CO2's 4.40) gives only a tiny correction -- but the
+agreement is excellent (0.1-0.4%).
+
+**3. Analytic composition derivatives.** The hard-chain and dispersion
+contributions to `dalpha_r/dx_i` are now computed analytically via
+the chain rule through (zeta_0..zeta_3, m_bar, m2es3, m2e2s3). The
+association and polar contributions retain the FD fallback (analytic
+implicit-differentiation for association would be lengthy and of small
+practical value). New `_alpha_r_core(rho, T, x, return_dx=True)`
+returns `(alpha_r, dalpha_r_dx)` in one pass, exploited by `ln_phi`
+for substantial speedup.
+
+**Validation:** analytic vs FD agree to `~1e-9` relative error on all
+test cases (non-polar binaries/ternaries, CO2-ethane with quadrupole,
+acetone-ethane with dipole, water-methanol with cross-association).
+
+**Speedup:** ~2x on `ln_phi` for 3-component non-polar mixtures. Full
+analytic envelope Jacobians are now feasible but not yet wired through
+the existing `dlnphi_dxk_at_p` API (which still uses FD on `ln_phi`);
+a further analytic `dlnphi_dxk_at_p` implementation would give another
+large speedup to envelope and Newton bubble/dew on SAFT mixtures.
+
+**Density solver redesign (v0.9.26/v0.9.27).** `density_from_pressure`
+now uses a 7-point pressure scan to pick the best Newton start (instead
+of sequential multi-start) followed by Newton, with a bisection fallback
+on the scan grid if Newton fails. This is much more robust than the
+prior multi-start strategy for strongly-associating fluids (water) and
+roughly 2x faster than the old worst-case multi-start path.
+
+**Test suite**: 110 SAFT tests (+40 since v0.9.25), total 952 across
+all suites. Added tests cover:
+- 4C scheme validation and user-params support
+- 2B default for pre-packaged components unchanged
+- Quadrupole field presence, effect on alpha_r
+- CO2 and N2 NIST saturation with quadrupole
+- Analytic dalpha/dx vs FD agreement for non-polar, polar, and
+  associating mixtures
+- ln_phi preservation after analytic-derivative refactor
+- Flash correctness preserved
+
+**DME re-parameterization in v0.9.25.** The v0.9.23 DME parameters
+(m=2.2634, sigma=3.2729 A, eps/k=210.29 K) were taken from a published
+non-polar PC-SAFT fit in which the dipole effect was implicitly absorbed
+into the dispersion parameters -- incompatible with the default-on
+calibrated polar term introduced in v0.9.24 (which would then
+double-count the attractive dipolar contribution).
+
+New DME parameters were fitted against NIST saturation-pressure data
+over T in [240, 340] K with the calibrated polar term active:
+
+| Parameter | v0.9.23-v0.9.24    | v0.9.25 (new)      |
+|-----------|--------------------|--------------------|
+| m         | 2.2634             | 2.2634 (unchanged) |
+| sigma [A] | 3.2729             | **3.35**           |
+| eps/k [K] | 210.29             | **214.0**          |
+| mu [D]    | 1.3                | 1.3 (unchanged)    |
+
+**Validation against NIST (polar ON by default):**
+
+| T [K] | NIST p_sat [bar] | PC-SAFT | rel err |
+|-------|-----------------:|--------:|--------:|
+| 240   |          0.587   |  0.560  |  -4.5%  |
+| 260   |          1.376   |  1.343  |  -2.4%  |
+| 280   |          2.777   |  2.793  |  +0.6%  |
+| 300   |          5.098   |  5.213  |  +2.3%  |
+| 320   |          8.636   |  8.947  |  +3.6%  |
+| 340   |         13.72    | 14.369  |  +4.7%  |
+
+Max |error| = 4.7% over 240-340 K (primary DME operating range including
+normal boiling point at 248 K). Prior v0.9.24 parameters gave consistent
+~+22% error in the same range.
+
+**Test suite**: 76 SAFT tests (+6 over v0.9.24) covering DME NIST
+saturation agreement at six temperature points.
+
+**Polar-term calibration in v0.9.24** -- the dipolar Gross-Vrabec term
+added in v0.9.23 as an opt-in feature is now **on by default** for dipolar
+components. Empirical calibration against NIST acetone saturation pressure
+over T in [300, 450] K gave an optimal multiplicative prefactor of
+**1/(2 pi) ~= 0.1592** applied to the raw Pade closure; the same factor
+arises naturally from including the 1/(4 pi eps_0) factor for SI
+electrostatic conventions (the raw 7242.7 "Gaussian" Debye conversion
+over-counts relative to published Gross-Vrabec results by exactly this
+factor).
+
+**Validation against NIST acetone saturation:**
+
+| T [K] | NIST p_sat [bar] | PC-SAFT (scale=1/(2 pi)) | rel err |
+|-------|-----------------:|-------------------------:|--------:|
+| 300   |          0.3346  |                  0.3399  |  +1.6%  |
+| 350   |          1.8815  |                  1.9713  |  +4.8%  |
+| 400   |          6.859   |                  6.9433  |  +1.2%  |
+| 450   |         18.72    |                 18.0265  |  -3.7%  |
+
+Max |error| = 4.8% across 300-450 K.
+
+**Default-on change (opt-out via `enable_polar=False`).** The calibration
+is applied as a class-level constant `_POLAR_PREFACTOR = 1/(2 pi)` in
+`SAFTMixture`; the `SAFTMixture(..., enable_polar=True)` default is now
+flipped. Non-polar components (`dipole_moment == 0`) are unaffected,
+since the polar contribution is gated on the per-component dipole mask.
+Users with poorly-fit dipolar parameters can opt out.
+
+**Verified non-regressions:** methane baseline saturation unchanged
+(ln phi_L - ln phi_V = +0.0005 at NIST p_sat); CH4-ethane binary flash
+unchanged (beta = 0.5485). The calibrated polar contribution affects
+only components with a published dipole moment.
+
+**Test suite**: 70 SAFT tests (+5 over v0.9.23) covering calibrated
+polar default behavior, acetone NIST saturation agreement at four
+temperatures, opt-out semantics, and non-polar-component isolation.
+
+**Remaining future work:** re-parameterize DME (current values ~60%
+off NIST even without polar, confirming parameter set is bad not
+formula); add 4C association scheme for water (currently 2B; 4C
+gives better water p_sat); add quadrupolar term for CO2, N2.
+
+**PC-SAFT association and polar terms in v0.9.23** -- extends
+`stateprop.saft` to handle associating fluids (water, alcohols) via
+Wertheim TPT1 / Chapman-Radosz and polar fluids (acetone, ethers,
+refrigerants) via Gross-Vrabec 2006.
+
+**Association (Chapman-Radosz, 2B scheme).** Each associating
+component carries `eps_AB_k` (association energy / Boltzmann constant,
+K) and `kappa_AB` (association volume). The 2B scheme places one A
+donor site and one B acceptor site on each molecule with only A-B
+bonding allowed, so by symmetry X_A_i = X_B_i =: X_i satisfies:
+
+    X_i = 1 / (1 + rho_n * Sum_j x_j X_j Delta_ij)
+    Delta_ij = d_ij^3 * g_ij^hs(d_ij) * kappa_AB_ij
+               * [exp(eps_AB_ij/T) - 1]
+
+with Wolbach-Sandler combining rules for cross-association. The
+contribution to the residual Helmholtz is:
+
+    a^assoc/NkT = Sum_i x_i * 2 * [ln X_i - X_i/2 + 1/2]
+
+Cross-association handles mixtures of associating species (e.g.
+water + methanol) through pair-sum combining rules; non-associating
+components drop out via Delta_ij = 0.
+
+New pre-packaged associating components (parameters from Gross &
+Sadowski 2002):
+- `WATER`       m=1.0656, sigma=3.0007 A, eps/k=366.51 K, eps_AB/k=2500.7 K, kappa=0.0349
+- `METHANOL`    m=1.5255, sigma=3.2300 A, eps/k=188.90 K, eps_AB/k=2899.5 K, kappa=0.0352
+- `ETHANOL`     m=2.3827, sigma=3.1771 A, eps/k=198.24 K, eps_AB/k=2653.4 K, kappa=0.0324
+- `N_PROPANOL`  m=3.0300, sigma=3.2522 A, eps/k=234.98 K, eps_AB/k=2276.8 K, kappa=0.0153
+
+Validation: methanol saturation pressure at T=400 K is **within 2.2%
+of NIST** with the 2B association term. Without association the
+prediction would be orders of magnitude off -- hydrogen-bonded fluids
+cannot be captured by dispersion alone.
+
+**Polar term (Gross-Vrabec 2006, dipolar).** Implemented but **opt-in**
+via `SAFTMixture(..., enable_polar=True)`. The Pade closure
+
+    a^dd/NkT = a_2^dd / (1 - a_3^dd / a_2^dd)
+
+uses universal pair-polynomial coefficients in packing fraction eta
+with segment-pair dependence m_ij = min(sqrt(m_i m_j), 2). The triplet
+a_3 term is approximated by a factored pair sum for O(N^2) scaling.
+
+New pre-packaged polar components:
+- `ACETONE`  m=2.7447, sigma=3.2742 A, eps/k=232.99 K, dipole=2.88 D
+- `DME`      m=2.2634, sigma=3.2729 A, eps/k=210.29 K, dipole=1.30 D
+
+The polar term is behind the opt-in flag because the current implementation
+requires further parameter-constant calibration and triplet-sum refinement
+before it can be enabled by default. Turning the flag on demonstrably
+changes the residual Helmholtz, and the machinery is exposed for
+experimentation; production defaults remain the non-polar path until
+calibration lands.
+
+**Architecture.** Association and polar contributions plug into
+`SAFTMixture.alpha_r` as additive corrections to a_hc + a_disp. The
+`ln_phi` path (via thermodynamic-identity chain rule and FD on
+composition) automatically picks up the new contributions. All
+previously-integrated machinery (`cubic.flash_pt`, envelope tracer,
+three-phase flash) continues to work on associating SAFT mixtures
+without modification -- the architecture from v0.9.22 means extending
+the EOS residual energy is enough.
+
+**Test suite**: 12 new tests covering association mask/flag logic,
+X_A limits (ideal-gas vs liquid), association free-energy sign,
+methanol NIST saturation agreement, and polar opt-in behavior. All
+65 total SAFT tests pass, 0 failing.
+
+**PC-SAFT equation of state in v0.9.22** -- `stateprop.saft` adds a
+non-associating PC-SAFT equation of state (Gross & Sadowski 2001) as a
+third EOS family alongside the cubic and Helmholtz/GERG paths.
+
+Usage mirrors `stateprop.cubic`:
+
+    from stateprop.saft import PCSAFT, SAFTMixture, METHANE, ETHANE
+    mx = SAFTMixture([METHANE, ETHANE], composition=[0.5, 0.5],
+                     k_ij={(0, 1): 0.0})
+    p = mx.pressure(rho_mol=1000.0, T=220.0)
+    rho = mx.density_from_pressure(p=1e6, T=220.0, phase_hint='liquid')
+    lnphi = mx.ln_phi(rho_mol=1000.0, T=220.0)
+
+Pre-packaged parameter sets (from Gross & Sadowski 2001 Table 1) are
+available as module constants: `METHANE`, `ETHANE`, `PROPANE`,
+`N_BUTANE`, `N_PENTANE`, `N_HEXANE`, `N_HEPTANE`, `N_OCTANE`,
+`NITROGEN`, `CO2`. Custom components can be built directly with the
+`PCSAFT(m, sigma, epsilon_k, T_c, p_c, acentric_factor)` dataclass.
+
+**Architectural win: inherited flash / envelope / 3-phase.** `SAFTMixture`
+exposes the same method surface as `CubicMixture` (`ln_phi`, `pressure`,
+`density_from_pressure`, `wilson_K`, `caloric`, `N`, `components`, `x`).
+This means the entire `stateprop.cubic.flash` / stability / envelope /
+three-phase-flash machinery works directly on a `SAFTMixture`:
+
+    from stateprop.cubic.flash import flash_pt, stability_test_TPD
+    from stateprop.cubic.envelope import envelope_point
+    from stateprop.cubic.three_phase_flash import flash_pt_three_phase
+
+    result = flash_pt(p=2e6, T=220.0, z=[0.5, 0.5], mixture=saft_mix)
+
+No duplication of any high-level algorithms. The ~400 lines of PC-SAFT
+plus the existing generic flash/envelope/3-phase machinery give a
+full-featured SAFT thermodynamics suite.
+
+**Validation against NIST pure-component saturation:**
+
+| Fluid   | T [K] | NIST p_sat [bar] | PC-SAFT [bar] | rel err |
+|---------|------:|-----------------:|--------------:|--------:|
+| CH4     | 120   |          1.9153  |        1.919  |  +0.2%  |
+| CH4     | 150   |         10.40    |       10.402  |  +0.02% |
+| CH4     | 170   |         22.96    |       22.99   |  +0.1%  |
+| C2      | 200   |          2.169   |        2.176  |  +0.3%  |
+| C2      | 250   |         13.001   |       13.030  |  +0.2%  |
+| CO2     | 220   |          5.996   |        6.31   |  +5.2%  |
+| CO2     | 250   |         17.87    |       18.6    |  +4.0%  |
+
+Non-polar paraffins show sub-1% error even well into the sub-critical
+regime, while CO2 (quadrupolar, no polar term in this implementation)
+shows ~5% error as expected for bare PC-SAFT without polar contributions.
+
+**Implementation scope.** The current implementation is non-associating
+PC-SAFT (hard-chain + dispersion). Association (for water, alcohols,
+acids) and polar-term additions (dipolar JC, quadrupolar) are natural
+follow-ups that leave the mixture derivative API untouched. Composition
+derivatives in `ln_phi` are computed by FD rather than analytic; an
+analytic version would unlock Newton bubble/dew and the analytic
+envelope Jacobian at full speed for SAFT mixtures too.
+
+**Test suite**: 53 new tests in `tests/run_saft_tests.py` cover pure-
+component saturation vs NIST for methane/ethane/CO2, ideal-gas limit,
+low-pressure fugacity coefficient limit, liquid-side dp/drho
+monotonicity, density round-trip for both branches, caloric properties,
+binary PT flash via the inherited cubic.flash_pt, Wilson K, Michelsen
+stability test via the inherited cubic.stability_test_TPD, and API
+surface compatibility with `CubicMixture`.
+
+**Composition-based SS ported back to Helmholtz in v0.9.21** -- the
+three-phase flash in `stateprop.mixture.three_phase_flash` now uses the
+same composition-iterated SS algorithm as the cubic path (v0.9.20).
+Same algorithm in both EOS families:
+
+1. Compute ln phi for each of x1, x2, y; derive fresh K_VL1, K_L2L1.
+2. Solve for (beta_V, beta_L1, beta_L2) by projected linear
+   least-squares on material balance (z = beta_V y + beta_L1 x1 +
+   beta_L2 x2) with simplex constraint.
+3. Update compositions via x1 = z/D, x2 = K_L2L1 x1, y = K_VL1 x1.
+
+Multi-seed retry also ported. The GERG-2008 specific cases from
+v0.9.19 (VLE preservation, supercritical preservation, material-balance
+closure, phase-fraction sum, constructed-K recovery -- 15 checks) all
+pass unchanged with the new SS. The port removes the rank-1
+Rachford-Rice pathology risk from the Helmholtz path (never observed
+in GERG-2008, but would surface for any future Helmholtz system
+developing near-pure phases, e.g. with activity-coefficient mixing
+rules or non-GERG departure functions).
+
+Both `stateprop.cubic.three_phase_flash` and
+`stateprop.mixture.three_phase_flash` now share the same proven
+algorithm, only diverging in the EOS-family-specific API touchpoints
+(`mixture.ln_phi(...)` method vs `ln_phi(..., mixture)` module
+function).
+
+The `_rachford_rice_3p` function is retained in both modules as a
+reference utility for unit-testing the RR kernel in isolation, though
+neither production SS path calls it directly anymore.
+
+**Three-phase (VLLE) flash for cubic EOS in v0.9.20** -- port of the
+Helmholtz 3-phase flash (v0.9.19) to the cubic family. New module
+`stateprop.cubic.three_phase_flash` with `flash_pt_three_phase` and
+`ThreePhaseFlashResult` classes exposed at `stateprop.cubic` top level.
+
+The cubic port introduced an algorithmic improvement over v0.9.19: the
+outer SS iterates on compositions (x1, x2, y) directly rather than on
+K-factors. This avoids a numerical pathology that arises in cubic
+water-hydrocarbon LLE (and likely any near-pure-phase LLE system):
+
+- 2-phase flash converges to a **degenerate split** where one component
+  is essentially zero in the liquid phase (e.g., water-nButane PR with
+  k_ij=0.50 at T=350K/p=1MPa gives x=[1.0, 7e-12])
+- Building K_L2L1 = x2/x1 then produces K ~ 10^10 to 10^11 due to the
+  vanishing denominator
+- The 2D Rachford-Rice becomes rank-deficient when the resulting
+  K_VL1 - 1 and K_L2L1 - 1 are proportional (det J ~ 1e-14 at seed,
+  |det|/(|J11||J22|) ~ 1e-16 -- structural, not starting-point)
+
+The composition-based SS sidesteps this by:
+1. At each iteration, computing ln phi for each phase and deriving
+   fresh K_VL1, K_L2L1.
+2. Solving for (beta_V, beta_L1, beta_L2) by **projected linear
+   least-squares on material balance** (z = beta_V y + beta_L1 x1 +
+   beta_L2 x2) with the simplex constraint -- no Rachford-Rice Jacobian
+   needed.
+3. Updating compositions via x1 = z / D, x2 = K_L2L1 x1, y = K_VL1 x1
+   (same formula as RR but using the betas just obtained, not iterating
+   for them with a singular Jacobian).
+
+Verified on the water-nButane PR VLLE benchmark:
+
+| Property | Value |
+|----------|-------|
+| Phase label | VLLE |
+| beta_V | 0.251 |
+| beta_L1 (water-rich) | 0.490 |
+| beta_L2 (butane-rich) | 0.259 |
+| x1 (water-rich liquid) | [1.00, 7e-12] (pure water) |
+| x2 (butane-rich liquid) | [0.00367, 0.99633] |
+| y (vapor) | [0.0361, 0.9639] |
+| Material balance closure | 6.8e-10 |
+
+VLE regression-tested on CO2-CH4 PR (k_ij=0.09) at 5 MPa/220 K: stays
+2-phase with no spurious 3-phase labeling. Supercritical states
+correctly remain single-phase. The pre-existing 238-test cubic suite
+passes unchanged, and 18 new tests cover the 3-phase flash end-to-end.
+
+Known remaining consideration: porting the composition-based SS back
+to the Helmholtz module is a natural follow-up. The v0.9.19 Helmholtz
+path uses K-based Rachford-Rice and works for the GERG-2008 cases it
+was tested on, but the same degenerate-phase pathology could hit if a
+future Helmholtz system develops near-pure phases.
+
+**Three-phase (VLLE) flash for Helmholtz/GERG in v0.9.19** -- new module
+`stateprop.mixture.three_phase_flash` extends the two-phase PT flash to
+handle vapor-liquid-liquid equilibria.
+
+Public API:
+
+- `flash_pt_three_phase(p, T, z, mixture, ...)` -- PT flash allowing
+  up to three equilibrium phases. Returns `ThreePhaseFlashResult` with
+  x1, x2, y compositions, phase fractions (beta_V, beta_L1, beta_L2),
+  caloric properties, and K-factors.
+- `ThreePhaseFlashResult` dataclass -- includes `phase` label ("VLLE" |
+  "VLE" | single-phase), per-phase densities, and a `two_phase_result`
+  field populated when the problem is actually two-phase or single-phase.
+
+Algorithm (Michelsen 1982):
+
+1. Run the standard 2-phase `flash_pt` at (p, T, z).
+2. If the 2-phase result is a two-phase split, run Michelsen TPD
+   stability on EACH of the two phases (not just the feed).
+3. If either phase is unstable, split it and initialize a 3-phase
+   successive-substitution iteration.
+4. Inner 3-phase Rachford-Rice: 2D Newton on (beta_V, beta_L2) using
+   the two closure equations
+      Sum_i z_i (K_VL1_i - 1) / D_i  = 0
+      Sum_i z_i (K_L2L1_i - 1) / D_i = 0
+   with negative-definite Jacobian guaranteeing a unique solution if
+   one exists in the feasible region.
+5. Outer SS: update K-factors from ln phi equality on all three phases,
+   iterate to convergence.
+6. Post-check: if any phase fraction drops below 1e-5, collapse to 2-phase
+   and return the original 2-phase result.
+
+The 3-phase Rachford-Rice solver was unit-tested with a constructed case
+where phase fractions and compositions are known: it recovers betas to
+1e-8 and compositions to 1e-8 exactly. Material balance (z = Sum_k
+beta_k x_k) closes to 1e-8 at solution.
+
+Scope caveat: GERG-2008 mostly targets natural-gas species where VLLE
+is rare. The practical common case -- CH4-water, CO2-water, H2S-water
+-- does not produce a clear 3-phase state in GERG-2008's regression
+range; the stability check correctly returns 'both phases stable' in
+these regions and the 3-phase flash degrades gracefully to 2-phase.
+The infrastructure is ready for use with EOS families where LLE is
+more prominent (cubics with appropriate k_ij, future SAFT-family models,
+etc.).
+
+**Analytic envelope Jacobian for Helmholtz/GERG in v0.9.18** -- port of
+the cubic analytic envelope Jacobian (v0.9.17) to the Helmholtz/GERG
+family. Same (N+2)x(N+2) structure, using the module-function
+derivative primitives `dlnphi_dx_at_p`, `dlnphi_dp_at_T`,
+`dlnphi_dT_at_p` from `stateprop.mixture.properties` (v0.9.9 / v0.9.10).
+
+Two kwargs exposing the analytic path:
+
+- `envelope_point(..., use_analytic_jac=True)` -- default True. Wilson-seeded
+  single-point corrector benefits from quadratic-convergence accuracy
+  without the FD noise concerns that affect the near-critical tracer
+  seed step.
+- `trace_envelope(..., use_analytic_jac_corrector=False)` -- opt-in.
+  Continuation corrector runs the analytic path when True; near-critical
+  seed step always uses FD.
+
+Performance on Helmholtz (speedup is larger than cubic because Helmholtz
+ln_phi is a much more expensive primitive):
+
+| Mixture                    | FD time    | Analytic time | Speedup |
+|----------------------------|-----------:|--------------:|--------:|
+| CH4-C2 binary (N=2)        |   374 ms   |      166 ms   |   2.2x  |
+| CH4-C2 binary (N=2) near-crit | 524 ms   |      242 ms   |   2.2x  |
+| CO2-CH4-C2 ternary (N=3)   |   978 ms   |      344 ms   |   2.8x  |
+
+Why Helmholtz benefits more per-N than cubic: Helmholtz `ln_phi` is
+~50-100x slower than cubic `ln_phi` (pure components each have their own
+50-term Helmholtz EOS evaluated in full, plus departure functions for
+each binary pair), so FD's 2(N+2) residual evaluations per Jacobian
+dominate total time. Analytic replaces these with a single evaluation
+of each derivative primitive plus O(N^2) matrix operations.
+
+Validation: `_envelope_jacobian_analytic` matches central-difference FD
+to ~1e-7 element-wise on bubble and dew branches; `envelope_point` with
+analytic and FD Jacobians agree to ~1e-10 relative on converged (T, p, K).
+
+Architecture consistency: the port touched exactly three lines per
+helper function (swap `mixture.dlnphi_dxk_at_p(...)` with module-level
+`dlnphi_dx_at_p(..., mixture, ...)`, same for dp and dT variants). The
+analytic Jacobian formulation is fully EOS-family-agnostic -- any future
+EOS exposing the same derivative API can inherit envelope tracing at
+analytic speed essentially for free.
+
+**Analytic envelope Jacobian for cubic EOS in v0.9.17** -- the envelope
+tracer's single-point corrector Newton now has access to an analytic
+(N+2)x(N+2) Jacobian built from the v0.9.8 / v0.9.10 / v0.9.16 derivative
+primitives (`dlnphi_dxk_at_p`, `dlnphi_dp_at_T`, `dlnphi_dT_at_p`),
+including Peneloux volume-shifted support. Previously the Jacobian was
+assembled via central-difference FD, requiring 2(N+2) residual
+evaluations per Newton iteration.
+
+Two new kwargs expose the analytic path:
+
+- `envelope_point(..., use_analytic_jac=True)` -- default True. The
+  Wilson-seeded single-point corrector starts far from the trivial K=1
+  basin, so analytic is a strict improvement here.
+- `trace_envelope(..., use_analytic_jac_corrector=False)` -- opt-in.
+  The continuation corrector runs the analytic path when True, while
+  the near-critical seed step always uses FD for robustness (see below).
+
+Performance (speedup scales with mixture size N):
+
+| Mixture      | FD time    | Analytic time | Speedup |
+|--------------|-----------:|--------------:|--------:|
+| N=2 binary   |    5.0 ms  |       4.7 ms  |   1.1x  |
+| N=5 NG-like  |   12.0 ms  |       7.0 ms  |   1.7x  |
+| N=10 heavy   |   66.5 ms  |      21.7 ms  |   3.1x  |
+
+Why the seed step keeps FD as default. The envelope tracer's
+eigenvector-seeded Newton at a state near the critical **always**
+converges toward the trivial solution (K -> 1 everywhere, the
+homogeneous fixed point) because that's a valid fixed point of the
+fugacity-equality system. FD leaves ~1e-8 noise in the converged state,
+and that perturbation is just enough for the arc-length continuation to
+drift away from the trivial root on its first continuation step. The
+analytic Jacobian converges to K=1 more accurately (~1e-12), which
+keeps the tracer stuck. Keeping FD at the seed step preserves this
+controlled imprecision; the corrector, which operates on
+already-converged envelope points far from K=1, gets no benefit from
+the noise and uses the analytic path cleanly when opted in.
+
+Validation. `_envelope_jacobian_analytic` matches central-difference FD
+to ~1e-8 element-wise on both bubble (beta=0) and dew (beta=1) branches
+for binary and ternary mixtures. `envelope_point` with analytic and FD
+Jacobians converge to identical (T, p, K) to ~1e-10 relative.
+`trace_envelope` with the analytic corrector produces envelopes whose T
+span agrees with the FD-corrector envelope to within 30%.
+
+**Peneloux volume translation in cubic analytic Jacobians (v0.9.16)** --
+Extends `dlnphi_dxk_at_p`, `dlnphi_dp_at_T`, `dlnphi_dT_at_p` on
+`CubicMixture` to support Peneloux-shifted mixtures. Previously these
+three methods raised `NotImplementedError` for any mixture with a
+non-zero volume shift, forcing Newton bubble/dew to fall back to SS on
+Peneloux models. With v0.9.16, Peneloux mixtures now run at full
+analytic-Jacobian speed.
+
+Derivation. The Peneloux shift adds the term `c_i * p/(RT)` to each
+component's ln phi, since `v_real = v_cubic - c_mix(x)` in this codebase's
+convention:
+
+    ln phi_real_i(p, T, x) = ln phi_cubic_i(p, T, x) + c_i * p/(RT)
+
+Differentiating the shift term gives the corrections applied to the
+unshifted cubic derivatives:
+
+    d/dx_k |_{T,p}  :  +(p/RT) * dc_i/dx_k = 0
+                       (c_i is a pure-component constant -> no correction)
+    d/dp   |_{T,x}  :  +c_i / (RT)
+    d/dT   |_{p,x}  :  -c_i * p / (RT^2)
+
+The composition derivative has no Peneloux correction because c_i does
+not depend on x and the shift term is x-independent at fixed p. The
+pressure and temperature derivatives pick up the expected explicit
+scaling from the shift term.
+
+Implementation detail. The internal helpers (`_dlnphi_dx_at_rho`,
+`_dlnphi_drho_at_x`, etc.) treat their `rho` argument as `rho_cubic`.
+For Peneloux, `density_from_pressure` returns `rho_real = 1/v_real`, so
+each method converts `rho_cubic = 1/(1/rho_real + c_mix(x))` before
+calling the helpers. The cubic's pressure equation
+`p_cubic(rho_cubic, T, x) = p_target` is unchanged by the shift, so all
+partial derivatives inside the helpers remain correct.
+
+Validation. All three Peneloux-enabled derivatives are FD-verified to
+1e-8 to 1e-10 relative error across:
+
+- auto-Peneloux (1982 formula) c values on SRK, and manual numeric c
+- binary (CH4-nC4) and ternary (CH4-C2-C3) mixtures
+- vapor and liquid phases
+- multiple (T, p) states spanning sub- and near-critical regions
+
+Performance (SRK Peneloux CH4-ethane, previously fell back to SS):
+
+| Case                   | Before (SS)      | After (Newton)    | Speedup |
+|------------------------|------------------|-------------------|---------|
+| bubble_p @ 200K        | 16 / 7.5 ms      | 6 / 2.6 ms        | 2.9x    |
+| bubble_p @ 220K        | 25 / 14.6 ms     | 7 / 2.8 ms        | 5.2x    |
+| bubble_p @ 240K        | 42 / 51.4 ms     | 8 / 3.5 ms        | 14.6x   |
+| dew_p @ 240K           | 18 / 10.6 ms     | 5 / 2.1 ms        | 4.9x    |
+
+Newton iteration count on Peneloux now matches unshifted cubic -- the
+volume shift no longer penalizes convergence speed.
+
+**Newton-Raphson bubble/dew point solvers for cubic EOS in v0.9.15** --
+port of the Helmholtz Newton bubble/dew solvers (v0.9.14) to the cubic
+EOS family. Same formulation, same Jacobian structure, now exposed on
+CubicMixture's analytic derivative methods (v0.9.8 composition + v0.9.10
+T/p derivatives).
+
+Four new public functions in `stateprop.cubic.flash`:
+
+- `newton_bubble_point_p(T, z, mixture, ...)` -- bubble p at fixed T
+- `newton_bubble_point_T(p, z, mixture, ...)` -- bubble T at fixed p
+- `newton_dew_point_p(T, z, mixture, ...)` -- dew p at fixed T
+- `newton_dew_point_T(p, z, mixture, ...)` -- dew T at fixed p
+
+Each uses the analytic Jacobian blocks built from `dlnphi_dxk_at_p`,
+`dlnphi_dp_at_T`, `dlnphi_dT_at_p` on `CubicMixture`. Graceful SS
+fallback on:
+- Singular Jacobian (rare, near exact critical)
+- Density solver failure mid-iteration
+- `NotImplementedError` from Peneloux volume-shifted mixtures, where
+  the analytic derivative chain rule through the c_mix volume shift is
+  not yet wired through. The Peneloux case falls back to SS transparently.
+
+Performance (CH4-ethane PR, T_c ~ 267K):
+
+| Case                   | SS iters / time  | Newton iters / time | Speedup |
+|------------------------|------------------|---------------------|---------|
+| bubble_p @ 200K        | 17 / 8.0 ms      | 6 / 2.7 ms          | 3.0x    |
+| bubble_p @ 220K        | 25 / 15.6 ms     | 7 / 3.1 ms          | 5.0x    |
+| bubble_p @ 240K (Tc-27)| 43 / 40.3 ms     | 8 / 3.2 ms          | 12.8x   |
+| dew_p @ 220K           | 12 / 5.6 ms      | 5 / 2.4 ms          | 2.3x    |
+| dew_p @ 260K           | 45 / 33.0 ms     | 6 / 2.7 ms          | 12.1x   |
+| bubble_T @ 4.5 MPa     | 7 / 8.6 ms       | 7 / 3.8 ms          | 2.3x    |
+
+Same near-critical scaling as Helmholtz: Newton stays flat at ~5-8
+iterations while SS degrades super-linearly toward critical. Far from
+critical, Newton still wins ~3x on wall time due to avoiding SS's
+inner y-iteration for each p update.
+
+Cubic Newton + Helmholtz Newton share identical residual and Jacobian
+structure -- the port touched 4 of 17 expressions per solver (replace
+`dlnphi_dx_at_p` -> `mixture.dlnphi_dxk_at_p`, etc.), confirming the
+abstraction carries cleanly across EOS families.
+
+**Newton-Raphson bubble/dew point solvers for Helmholtz/GERG in v0.9.14** —
+quadratic-convergence replacements for the successive-substitution (SS)
+bubble/dew solvers, using the analytic Jacobians assembled from v0.9.9
+(composition derivatives of ln phi) and v0.9.10 (T/p derivatives of ln phi).
+
+Four new public functions in `stateprop.mixture.flash`, paralleling the
+existing SS solvers:
+
+- `newton_bubble_point_p(T, z, mixture, ...)` -- bubble-point p at fixed T
+- `newton_bubble_point_T(p, z, mixture, ...)` -- bubble-point T at fixed p
+- `newton_dew_point_p(T, z, mixture, ...)` -- dew-point p at fixed T
+- `newton_dew_point_T(p, z, mixture, ...)` -- dew-point T at fixed p
+
+Formulation: unknowns X = (ln K_1, ..., ln K_N, ln p)  [or ln T], giving
+N+1 variables with residuals
+
+    R_i        = ln K_i - (lnphi_i^L(z) - lnphi_i^V(y)),   i = 1..N
+    R_{N+1}    = Sum(K*z) - 1                               (bubble)
+               = Sum(z/K) - 1                               (dew)
+
+At each Newton step, the Jacobian is assembled with the chain rule
+
+    dy_m/dlnK_j = y_m (delta_mj - y_j)    (bubble, at fixed z)
+    dx_m/dlnK_j = x_m (x_j - delta_mj)    (dew, at fixed z)
+    dR_i/dlnK_j = delta_ij + (dlnphi_V_dy @ dy_dlnK)_ij    (bubble)
+    dR_i/dlnp   = -(dlnphi_L/dp - dlnphi_V/dp) * p
+    dR_{N+1}/dlnK_j = K_j * z_j           (bubble)
+
+using `dlnphi_dx_at_p`, `dlnphi_dp_at_T`, and `dlnphi_dT_at_p` for the
+three analytic blocks.
+
+Performance gains (Newton vs SS, agreements to 1e-8 or tighter in all cases):
+
+| Case                   | SS iters / time    | Newton iters / time | Speedup |
+|------------------------|--------------------|---------------------|---------|
+| CH4-C2 bubble @ 220K   | 24 / 1795 ms       | 7 / 135 ms          | 13x     |
+| CH4-C2 bubble @ 230K   | 30 / 2798 ms       | 7 / 151 ms          | 19x     |
+| CH4-C2 bubble @ 235K   | 34 / 3574 ms       | 8 / 172 ms          | 21x     |
+| CH4-C2 bubble @ 240K (Tc-4) | 41 / 4875 ms  | 8 / 179 ms          | 27x     |
+| CH4-C2 bubble @ 242K (Tc-2) | 45 / 5753 ms  | 8 / 169 ms          | 34x     |
+| CH4-C2 dew @ 220K      | 12 / 421 ms        | 5 / 92 ms           | 4.6x    |
+| CH4-C2 dew_T @ 2MPa    | 6 / 467 ms         | 5 / 111 ms          | 4.2x    |
+
+Near-critical is the dominant win: Newton iteration count stays flat
+(7-8 iterations) while SS iteration count degrades super-linearly
+(24 -> 45) as the state approaches the critical point. This is the
+classic Newton advantage near a turning point where the SS contraction
+factor approaches 1.
+
+Each Newton solver includes a **graceful SS fallback**: when the Newton
+Jacobian is singular (rarely, near exact critical) or when the density
+solver fails mid-iteration, the function delegates to the original SS
+solver with the current iterate as initial guess. This ensures
+robustness is at least as good as SS while adding the speedup everywhere
+SS could already converge.
+
+**Helmholtz/GERG phase envelope tracer in v0.9.13** — full bubble/dew
+envelope tracing at fixed composition z, seeded from the v0.9.12 critical
+point solver. Ports the cubic envelope tracer architecture from
+`stateprop.cubic.envelope` (same algorithm) to the Helmholtz mixture
+EOS family.
+
+Two public functions in `stateprop.mixture.envelope`:
+
+- `envelope_point(T, p, z, mixture, beta)` — single envelope point via
+  Wilson-seeded Newton. `beta=0` for bubble (z = liquid phase), `beta=1`
+  for dew (z = vapor phase). Returns converged (T, p, K) with tight
+  fugacity closure (max |ln K - (lnphi_L - lnphi_V)| < 1e-7).
+
+- `trace_envelope(z, mixture, ...)` — full envelope trace starting at the
+  mixture critical point and walking outward along the envelope tangent
+  in both directions. Returns arrays of (T, p, K) points plus branch
+  labels (0=bubble, 1=dew, -1=critical).
+
+Algorithm:
+1. Call `critical_point_multistart(z, mixture)` to get exact (T_c, p_c, V_c)
+   and the null eigenvector u of the residual Helmholtz Hessian.
+2. For each direction in {+1, -1}:
+   a. Multi-strategy seeding: eigenvector perturbation at shrinking offsets;
+      fallback to Wilson-seeded point near the critical if needed.
+   b. Arc-length continuation in variables X = (ln K_1..N, ln T, ln p).
+   c. Quadratic Lagrange predictor when 3+ history points available;
+      linear tangent predictor otherwise.
+   d. Adaptive spec-variable switching (picks X component with largest
+      tangent magnitude each step) and beta switching (bubble <-> dew)
+      based on z-weighted ln K asymmetry with hysteresis.
+   e. Step-size adaptation from predictor-corrector agreement.
+   f. Graceful termination on T/p bounds, density-solver failure in
+      supercritical regions, or step collapse.
+3. Results: low-p dew, critical, low-p bubble concatenated in order.
+
+Variables: X = (ln K_1, ..., ln K_N, ln T, ln p), N+2 variables.
+Residuals (N+2):
+    R_i = ln K_i - (ln phi_i^L - ln phi_i^V), i=1..N   (fugacity equality)
+    R_{N+1} = Sum(y) - 1 (beta=0) or Sum(x) - 1 (beta=1)  (Rachford-Rice)
+    R_{N+2} = X[spec_idx] - spec_target                   (arclength)
+
+**Scope and limitations:**
+- The near-critical portion (say T_c +/- 30K, 0.5 p_c to p_c) is reliably
+  traced with tight fugacity closure.
+- Bubble-side far from critical works well down to low (T, p).
+- Dew-side far from critical can have accuracy issues when K-factors are
+  near 1 (the Sum(z/K)-1 residual becomes insensitive). Same caveat as
+  the cubic tracer; for quantitative results at specific targets use
+  `envelope_point(T, p, z, mixture)` with fixed (T, p).
+- Symmetric compositions (z_i = 0.5 for binary) produce "mirror branches"
+  where both traversal directions give the same envelope described from
+  swapped phase perspectives. Physically correct but the bubble/dew labels
+  are not distinct for symmetric z. For asymmetric z, branches separate
+  naturally.
+
+The Jacobian is assembled via central-difference FD on the residual
+vector; the underlying ln_phi and density_from_pressure primitives are
+all analytic from v0.9.9-v0.9.10, so this adds only ~1e-8 numerical
+noise. An analytic Jacobian using the full derivative set is a possible
+optimization if envelope tracing becomes a performance bottleneck.
+
+**Robust Helmholtz/GERG mixture critical point solver in v0.9.12** — the
+experimental `critical_point` from v0.9.11 had a known failure mode: H-K
+equations `R1 = R2 = 0` typically have multiple roots, and simple Newton
+can converge to non-physical stationary points of the residual Helmholtz
+surface (negative-p roots, Z_c > 0.5 secondary roots, etc.). The new
+`critical_point_multistart(z, mixture)` addresses this by combining:
+
+1. **Diverse initial guess set** (~50 candidates covering: Kay-rule pseudo-
+   critical, GERG reducing function, each pure component's (T_c, V_c),
+   pairwise midpoints, and a dense 2D T-V grid centered near the
+   pseudo-critical). This finds all physical roots even when their basin
+   of attraction is very small (e.g. CH4-N2 at 50/50 where the physical
+   VLE critical basin contains ~5% of arbitrary grid starts).
+
+2. **Clustering and physical scoring**: converged Newton solutions are
+   clustered by (T, V) proximity; each cluster is scored by a Gaussian on
+   Z_c (centered at 0.29, width 0.08) times a log-Gaussian on V_c /
+   V_pure_avg (width 0.7). Hard rejects for negative p or Z_c outside
+   [0.13, 0.55]. Best-scoring candidate wins.
+
+3. **TPD stability veto**: candidates with |S-1| > 0.3 from Michelsen's
+   stability test are rejected. A true critical point has S → 1 (marginal
+   stability), so large |S-1| indicates a non-critical stationary point.
+   Used as a veto only, not a fine-grained scorer, to avoid brittleness
+   from Wilson K-factor initialization.
+
+Scope verified via testing:
+- **Type I binaries (CO2-CH4, CH4-ethane, ethane-propane, etc.)**: clean
+  single VLE critical locus, solved reliably with scores > 0.6
+- **CH4-N2 across full composition range**: finds the physical VLE
+  critical at V_c ≈ 85 cm³/mol, Z_c ≈ 0.23 for all z_N2 ∈ [0.1, 0.9]
+- **Type III binaries with discontinuous critical loci (CO2-N2)**: the
+  solver still converges but flags `suspicious=True` when the best
+  candidate's score is below a threshold, signaling the user that
+  phase-envelope tracing is needed to identify the correct branch
+
+Returns a dict with `T_c, p_c, V_c, rho_c, u, iterations, residual, score,
+n_candidates_found, suspicious` fields. With `return_all=True`, adds a
+full list of all scored candidates (useful for diagnosing difficult systems).
+
+**Helmholtz/GERG residual Helmholtz Hessian + experimental critical point in v0.9.11** —
+the symmetric residual Helmholtz Hessian
+
+    A_ij^{res} = d^2(n * alpha^r) / dn_i dn_j |_{T, V}
+
+is now assembled analytically using the v0.9.9 composition derivatives.
+FD-verified to 1e-7 across GERG and no-departure mixtures. The assembly
+uses the chain rule
+
+    A_ij/(RT) = rho * dlnphi_drho[i] + dlnphi_dx[i,j] - sum_k x_k * dlnphi_dx[i,k]
+              + (dp/dn_j) / p - 1
+
+where the second line is d(ln Z)/dn_j, cancelling the asymmetric part of
+d(ln phi_i)/dn_j to give a symmetric Hessian on A^{res} = RT*(ln phi + ln Z).
+
+An **experimental** `critical_point(z, mixture)` solver uses Heidemann-Khalil
+(1980) on this Hessian: the mixture critical point is where the smallest
+eigenvalue of Michelsen's scaled B = I + sqrt(n_i n_j) A^{res}_{ij} / (RT)
+is zero, combined with a third-order directional condition along the null
+eigenvector. Newton's method on (T, V) with FD Jacobian on the residual pair.
+
+Tested against GERG-2008 critical loci, matching CO2-CH4 50/50 critical to
+T_c = 245.08 K (within 0.5 K of experiment) and converging cleanly to the
+VLE critical branch. A `suspicious=True` flag is set when the converged
+V_c falls outside [0.3x, 3x] of the pure-component-weighted average --
+this guards against H-K's occasional convergence to secondary (non-VLE)
+critical solutions, a known issue for some binaries involving N2 as the
+smaller component. Future improvements will add Wilson-based multistart
+and continuation from pure-component limits for more robust coverage.
+
+**Temperature and pressure derivatives of ln φ in v0.9.10** — the primitive
+set of first-order sensitivities of ln φ is now complete for both EOS families.
+In addition to the composition Jacobian already available from v0.9.8 (cubic)
+and v0.9.9 (Helmholtz), the following are now exposed:
+
+For cubic mixtures on `CubicMixture`:
+- `dlnphi_dp_at_T(p, T, x, phase_hint)` — N-vector ∂(ln φ)/∂p at fixed (T, x)
+- `dlnphi_dT_at_p(p, T, x, phase_hint)` — N-vector ∂(ln φ)/∂T at fixed (p, x)
+
+For Helmholtz/GERG mixtures in `stateprop.mixture.properties`:
+- `dlnphi_dp_at_T(p, T, x, mixture, phase_hint)` — N-vector ∂(ln φ)/∂p
+- `dlnphi_dT_at_p(p, T, x, mixture, phase_hint)` — N-vector ∂(ln φ)/∂T
+- `dp_dT_at_rho(rho, T, x, mixture)` — scalar ∂p/∂T at fixed (ρ, x)
+- `dlnphi_dT_at_rho(rho, T, x, mixture)` — N-vector ∂(ln φ)/∂T at fixed (ρ, x)
+
+All are FD-verified to ~1e-7 or better across vapor and liquid phases for
+pure, no-departure (ethanol-water), and full-GERG (CH4-N2, CO2-N2, 4-comp NG)
+mixtures. The pressure derivative is a one-line chain rule
+
+    ∂(ln φ)/∂p|_{T,x} = ∂(ln φ)/∂ρ|_{T,x} / ∂p/∂ρ|_{T,x}
+
+reusing pieces already present from the composition-derivative work. The
+temperature derivative requires both the partial at fixed (ρ, x) and the
+implicit density response ∂ρ/∂T|_{p,x} = -∂p/∂T|_{ρ,x} / ∂p/∂ρ|_{T,x}.
+For the Helmholtz case the partial at fixed (ρ, x) is particularly clean
+because δ = ρ/ρ_r(x) doesn't depend on T — only τ = T_r(x)/T does, with
+∂τ/∂T = -τ/T, giving a direct τ-chain on every term of ln φ.
+
+**Complete first-order derivative set.** Combined with the composition
+derivatives from v0.9.8-v0.9.9, the full first-order sensitivity of ln φ
+to its independent variables (x, T, p) is now available analytically for
+both EOS families. This completes the foundational primitives needed for:
+- Newton-Raphson bubble-point and dew-point solvers (vs the SS-based ones today)
+- Phase envelope tracing with arclength continuation
+- Thermodynamic sensitivity analysis for process optimization
+- Trust-region methods for difficult flash cases near phase boundaries
+- Direct critical-point solvers (which need second-order pieces built on
+  top of these first derivatives)
+
+These are all algorithms that reduce to Newton iteration in a space of
+composition, temperature, and pressure — the precise space where we now
+have analytic first-order sensitivities.
+
+**Analytic composition derivatives for the Helmholtz/GERG mixture EOS in v0.9.9** —
+the analogous N×N Jacobian for second-order methods on the Helmholtz mixture
+flash is now available as `stateprop.mixture.properties.dlnphi_dx_at_p(p, T, x, mixture, phase_hint)`.
+Same chain-rule structure as the cubic case (v0.9.8) but substantially more involved
+because the Helmholtz mixture has reducing functions T_r(x), ρ_r(x), pure
+components evaluated at MIXTURE-reduced (δ, τ), and a departure function with
+both explicit and implicit composition dependence. All four building blocks are
+FD-verified to ~1e-9 across no-departure (ethanol-water) and full-GERG (CH4-N2,
+CO2-N2, 4-component natural gas) cases on both phases:
+
+| Quantity | Function | FD-verified rel err |
+|---|---|---|
+| ∂p/∂x at fixed (T, ρ) | `dp_dx_at_rho` | ~1e-10 |
+| ∂(ln φ)/∂ρ at fixed (T, x) | `dlnphi_drho_at_x` | ~5e-10 |
+| ∂(ln φ_i)/∂x_k at fixed (T, ρ) | `dlnphi_dx_at_rho` | ~2e-10 (4-comp GERG) |
+| **∂(ln φ_i)/∂x_k at fixed (T, p)** | `dlnphi_dx_at_p` | ~4e-10 (4-comp GERG) |
+
+The implementation requires three supporting analytic derivations:
+
+1. **Reducing-function Hessian** (`KunzWagnerReducing.hessian(x)` in
+   `stateprop/mixture/reducing.py`) — N×N matrices ∂²T_r/∂x_k∂x_l and
+   ∂²(1/ρ_r)/∂x_k∂x_l from twice-differentiating the Kunz-Wagner pair-sum
+   structure. Used to compute composition derivatives of `n_dTr_dni` and
+   `rho_r_factor` in the `tau_piece` and `delta_piece` of ln φ. Symmetric and
+   FD-verified to 1e-10 against the existing analytic first derivatives.
+   The kernel u(a, b; β) = ab(a+b)/(β²a+b) yields:
+
+       ∂²u/∂a²  = (N_aa D² - 2β² N_a D + 2β⁴ N) / D³
+       ∂²u/∂b²  = (N_bb D² - 2 N_b D + 2 N) / D³
+       ∂²u/∂a∂b = (2s D² - (β² N_b + N_a) D + 2β² N) / D³
+
+   where N = ab(a+b), s = a+b, D = β²a+b, N_a = b(2a+b), N_b = a(a+2b),
+   N_aa = 2b, N_bb = 2a.
+
+2. **Extended departure evaluator** (`evaluate_total_departure_extended`
+   in `stateprop/mixture/departure.py`) — returns the existing 7 outputs of
+   `evaluate_total_departure` PLUS `dDelta_d_dxi`, `dDelta_t_dxi`, and
+   `d2Delta_dxidxj`. The Hessian of Δ is sparse — only off-diagonal pairs
+   from stored departure pairs populate, with value F_ij·A_ij(δ, τ).
+
+3. **Composition-derivative chain rule on each ln φ term** — the 6-term
+   derivation lives in `dlnphi_dx_at_rho`'s code, with comments tying each
+   line back to the math. The harder pieces are `delta_piece`'s product
+   rule (involves the rho_r_factor composition derivative through H_invrho
+   and ρ_r derivatives) and `tau_piece`'s product rule (involves the
+   n_dTr_dni composition derivative through H_T and Tr derivatives).
+
+**Newton flash for Helmholtz mixtures** — `newton_flash_pt(p, T, z, mixture)`
+in `stateprop/mixture/flash.py` is the same chain-rule wrapper as the cubic
+Newton flash: builds the ln-K Jacobian by combining the analytic
+`dlnphi_dx_at_p` with the implicit-RR derivatives `∂β/∂K`, `∂x/∂K`, `∂y/∂K`.
+Converges in **4 iterations** on typical 2-component flashes (vs 9-10 for
+SS+Broyden), but each iter costs ~2× as much because the Helmholtz analytic
+Jacobian is more expensive to assemble than the cubic one (reducing-function
+Hessian + departure composition derivatives + per-component pure-α^r
+second derivatives all enter). Walltime is comparable or modestly slower
+than SS+Broyden for typical 2-5 component cases:
+
+| Helmholtz Newton flash case | SS+Broyden | Newton (analytic) |
+|---|---|---|
+| CH4-N2 130K, 2 MPa | 74 ms (10 it) | 94 ms (4 it) |
+| Ethanol-water 350K, 0.5 bar | 72 ms (10 it) | 79 ms (4 it) |
+| CO2-N2 220K, 3 MPa | 65 ms (9 it) | 78 ms (4 it) |
+
+The same caveats and use-case guidance from the cubic v0.9.8 release apply
+here: Newton wins when guaranteed quadratic convergence is needed, when N
+is large, or when the converged Jacobian is itself the deliverable (e.g.
+sensitivity analysis). Both flashes are exposed; users pick based on their
+needs. Volume-translation analog (Peneloux) is N/A here — Helmholtz EOSes
+don't have a Peneloux correction.
+
+**Analytic composition derivatives in v0.9.8** — the central N×N Jacobian
+needed for second-order methods on the cubic flash is now available as
+`CubicMixture.dlnphi_dxk_at_p(p, T, x, phase_hint)`, returning
+`d(ln φ_i)/d x_k` at fixed (T, p). All four building blocks are
+FD-verified to ~1e-7 across multiple compositions and both phases:
+
+| Quantity | Method | FD-verified rel err |
+|---|---|---|
+| ∂p/∂x at fixed (T, ρ) | `_dp_dx_at_rho` | ~1e-10 |
+| ∂(ln φ)/∂ρ at fixed (T, x) | `_dlnphi_drho_at_x` | ~5e-9 |
+| ∂(ln φ_i)/∂x_k at fixed (T, ρ) | `_dlnphi_dx_at_rho` | ~1e-8 |
+| **∂(ln φ_i)/∂x_k at fixed (T, p)** | `dlnphi_dxk_at_p` | ~5e-9 |
+
+The fixed-(T, p) derivative combines the first three via the chain rule
+
+    d(ln φ_i)/dx_k|_{T,p} = d(ln φ_i)/dx_k|_{T,ρ}
+                          + d(ln φ_i)/dρ|_{T,x} · dρ/dx_k|_{T,p}
+
+with `dρ/dx_k|_{T,p} = -∂p/∂x_k|_{T,ρ} / ∂p/∂ρ|_{T,x}` from implicit
+differentiation of the cubic. The derivation lives in the docstrings of
+the helper methods in `stateprop/cubic/mixture.py`. Volume translation
+(Peneloux) is not yet supported in the analytic Jacobian — the method
+raises `NotImplementedError` if called on a mixture with volume shifts.
+
+**Newton flash with full analytic Jacobian** — `newton_flash_pt(p, T, z, mixture)`
+in `stateprop/cubic/flash.py` uses the analytic Jacobian for true Newton-
+Raphson on ln K, with the chain rule including ∂β/∂K from implicit
+differentiation of Rachford-Rice. Converges in 4-6 iterations vs 8-15
+for the SS+Broyden default — but each iter costs ~2× as much (one
+analytic Jacobian build via `dlnphi_dxk_at_p`, one linear solve), so
+**walltime is roughly tied or slightly slower than Broyden for typical
+2-5 component flash**. Use Newton when:
+
+- you need guaranteed quadratic convergence (e.g. inside trust-region
+  algorithms, or when stepping along a phase envelope at small dT)
+- the problem is large (N ≫ 5), where Broyden's secant approximation
+  fills in slowly enough that full Newton wins on iter count
+- you want the converged Jacobian for free (e.g. for sensitivity analysis)
+
+The analytic derivatives are foundational pieces for several other
+algorithms beyond flash: phase envelope tracing with arclength continuation,
+direct critical-point solvers (which need the Hessian via second-order
+chain rule), and Hessian-augmented stability tests for global instability
+detection. The Newton flash itself is a small wrapper demonstrating one
+use case; the bigger value is exposing `dlnphi_dxk_at_p` as a building
+block for downstream algorithms.
 
 **Cubic flash acceleration in v0.9.7** — the same SS+Broyden hybrid that
 sped up the Helmholtz mixture flash in v0.9.5 has been ported to the

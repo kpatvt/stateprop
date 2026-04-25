@@ -63,7 +63,7 @@ from .phase_envelope import trace_phase_envelope, PhaseEnvelope
 from . import mixture
 from . import cubic
 
-__version__ = "0.9.56"
+__version__ = "0.9.57"
 
 __all__ = [
     # Core
