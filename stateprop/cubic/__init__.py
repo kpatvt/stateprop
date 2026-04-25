@@ -40,12 +40,19 @@ from .flash import (
     CubicFlashResult,
     flash_pt,
     flash_ph, flash_ps, flash_th, flash_ts,
+    flash_tv, flash_uv, flash_pv,
+    flash_p_alpha, flash_t_alpha,
     stability_test_TPD,
     bubble_point_p, bubble_point_T,
     dew_point_p, dew_point_T,
+    newton_bubble_point_p, newton_bubble_point_T,
+    newton_dew_point_p, newton_dew_point_T,
 )
 from .critical import critical_point
 from .envelope import envelope_point, trace_envelope
+from .three_phase_flash import (
+    ThreePhaseFlashResult, flash_pt_three_phase,
+)
 from .from_chemicals import (
     lookup_pure_component,
     cubic_from_name,
@@ -66,9 +73,12 @@ __all__ = [
     "stability_test_TPD",
     "bubble_point_p", "bubble_point_T",
     "dew_point_p", "dew_point_T",
+    "newton_bubble_point_p", "newton_bubble_point_T",
+    "newton_dew_point_p", "newton_dew_point_T",
     "critical_point",
     "envelope_point",
     "trace_envelope",
+    "ThreePhaseFlashResult", "flash_pt_three_phase",
     # chemicals-library interface (v0.8.0)
     "lookup_pure_component", "cubic_from_name",
     "PR_from_name", "PR78_from_name", "SRK_from_name",

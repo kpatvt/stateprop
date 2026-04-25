@@ -7,7 +7,7 @@ build-backend = "setuptools.build_meta"
 # ---------------------------------------------------------------------------
 [project]
 name            = "stateprop"
-version         = "0.9.4"
+version         = "0.9.56"
 description     = "Multiparameter Helmholtz equation of state for pure-fluid and mixture thermodynamic properties (Span-Wagner, IAPWS-95, GERG-2008) plus cubic equations of state (PR/SRK/RK/vdW with Mathias-Copeman, Twu, PRSV alpha-functions, Peneloux volume translation, mixture critical points and phase envelopes, optional chemicals-library lookup)."
 readme          = "README.md"
 requires-python = ">=3.9"

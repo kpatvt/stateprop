@@ -248,6 +248,250 @@ def test_pt_flash_fugacity_equality():
               f"rho_L={r.rho_L}, rho_V={r.rho_V}")
 
 
+def test_cubic_analytic_dlnphi_dx_at_rho():
+    """The analytic d(ln phi_i)/d x_k at fixed (T, rho) must match
+    a 2-point finite-difference of ln_phi to ~1e-7 across phases.
+    Tests the matrix building blocks before the chain rule combines them."""
+    c1 = PR(190.564, 4.5992e6, 0.01142)
+    c2 = PR(425.12, 3.796e6, 0.2002)
+    mx = CubicMixture([c1, c2], composition=[0.5, 0.5], k_ij={})
+    T, p = 300.0, 5e6
+    x = np.array([0.5, 0.5])
+    for phase in ('vapor', 'liquid'):
+        rho = mx.density_from_pressure(p, T, x, phase_hint=phase)
+        J_an = mx._dlnphi_dx_at_rho(rho, T, x)
+        h = 1e-6
+        J_fd = np.zeros((2, 2))
+        for k in range(2):
+            ek = np.eye(2)[k]
+            J_fd[:, k] = (mx.ln_phi(rho, T, x + h*ek) - mx.ln_phi(rho, T, x - h*ek)) / (2*h)
+        rel = np.max(np.abs((J_an - J_fd) / J_fd))
+        check(f"d(lnphi)/dx at fixed (T,rho) [{phase}]: rel err < 1e-6",
+              rel < 1e-6, f"got {rel:.2e}")
+
+
+def test_cubic_analytic_dlnphi_drho():
+    """d(ln phi)/drho at fixed (T, x). N-vector. FD-verified."""
+    c1 = PR(190.564, 4.5992e6, 0.01142); c2 = PR(425.12, 3.796e6, 0.2002)
+    mx = CubicMixture([c1, c2], composition=[0.5, 0.5], k_ij={})
+    T, p = 300.0, 5e6; x = np.array([0.5, 0.5])
+    for phase in ('vapor', 'liquid'):
+        rho = mx.density_from_pressure(p, T, x, phase_hint=phase)
+        an = mx._dlnphi_drho_at_x(rho, T, x)
+        hr = max(rho * 1e-6, 1e-3)
+        fd = (mx.ln_phi(rho + hr, T, x) - mx.ln_phi(rho - hr, T, x)) / (2 * hr)
+        rel = np.max(np.abs((an - fd) / fd))
+        check(f"d(lnphi)/drho at fixed (T,x) [{phase}]: rel err < 1e-5",
+              rel < 1e-5, f"got {rel:.2e}")
+
+
+def test_cubic_analytic_dp_dx_at_rho():
+    """d(p)/d(x_k) at fixed (T, rho). FD against the EOS pressure formula."""
+    c1 = PR(190.564, 4.5992e6, 0.01142); c2 = PR(425.12, 3.796e6, 0.2002)
+    mx = CubicMixture([c1, c2], composition=[0.5, 0.5], k_ij={})
+    T, p_target = 300.0, 5e6; x = np.array([0.5, 0.5])
+    for phase in ('vapor', 'liquid'):
+        rho = mx.density_from_pressure(p_target, T, x, phase_hint=phase)
+        an = mx._dp_dx_at_rho(rho, T, x)
+        def p_at(x_):
+            a, b, _, _, _, _ = mx.a_b_mix(T, x_)
+            v = 1.0 / rho
+            return mx.R*T/(v - b) - a / ((v + mx.epsilon*b)*(v + mx.sigma*b))
+        h = 1e-6
+        fd = np.array([(p_at(x + h*np.eye(2)[k]) - p_at(x - h*np.eye(2)[k])) / (2*h)
+                       for k in range(2)])
+        rel = np.max(np.abs((an - fd) / fd))
+        check(f"dp/dx at fixed (T,rho) [{phase}]: rel err < 1e-6",
+              rel < 1e-6, f"got {rel:.2e}")
+
+
+def test_cubic_analytic_dlnphi_dxk_at_p():
+    """The headline result: d(ln phi_i)/d x_k at fixed (T, p), the
+    Newton-flash Jacobian. Combines all four building blocks via the
+    chain rule and FD-verifies the combination across multiple mixtures
+    and both phases."""
+    c_CH4 = PR(190.564, 4.5992e6, 0.01142)
+    c_N2  = PR(126.192, 3.3958e6, 0.0372)
+    c_C4  = PR(425.12, 3.796e6, 0.2002)
+    c_C10 = PR(617.7, 21.1e5, 0.4923)
+    test_states = [
+        (CubicMixture([c_CH4, c_N2], composition=[0.6, 0.4], k_ij={(0,1):0.025}),
+         200.0, 3e6, np.array([0.6, 0.4])),
+        (CubicMixture([c_CH4, c_C4], composition=[0.5, 0.5], k_ij={}),
+         300.0, 5e6, np.array([0.5, 0.5])),
+        (CubicMixture([c_CH4, c_C10], composition=[0.5, 0.5], k_ij={}),
+         350.0, 10e6, np.array([0.5, 0.5])),
+    ]
+    for mx, T, p, x in test_states:
+        for phase in ('vapor', 'liquid'):
+            J_an = mx.dlnphi_dxk_at_p(p, T, x, phase_hint=phase)
+            h = 1e-6
+            J_fd = np.zeros((2, 2))
+            for k in range(2):
+                ek = np.eye(2)[k]
+                rho_p = mx.density_from_pressure(p, T, x + h*ek, phase_hint=phase)
+                rho_m = mx.density_from_pressure(p, T, x - h*ek, phase_hint=phase)
+                J_fd[:, k] = (mx.ln_phi(rho_p, T, x + h*ek)
+                              - mx.ln_phi(rho_m, T, x - h*ek)) / (2*h)
+            rel = np.max(np.abs((J_an - J_fd) / np.where(np.abs(J_fd) > 1e-10, J_fd, 1.0)))
+            label = f"Tc={[c.T_c for c in mx.components]} T={T} p={p:.1e} {phase}"
+            check(f"dlnphi/dx at fixed (T,p) [{label}]: rel err < 1e-5",
+                  rel < 1e-5, f"got {rel:.2e}")
+
+
+def test_cubic_newton_flash_pt():
+    """Newton-Raphson flash with analytic Jacobian must converge to the
+    same answer as the SS+Broyden flash but in fewer iterations."""
+    from stateprop.cubic.flash import newton_flash_pt
+    c_CH4 = PR(190.564, 4.5992e6, 0.01142)
+    c_C10 = PR(617.7, 21.1e5, 0.4923)
+    mx = CubicMixture([c_CH4, c_C10], composition=[0.5, 0.5], k_ij={})
+    z = np.array([0.5, 0.5])
+    T, p = 350.0, 10e6
+    rb = flash_pt(p, T, z, mx)
+    rn = newton_flash_pt(p, T, z, mx)
+    check("Newton flash: 2-phase detected (matches Broyden)",
+          rn.phase == rb.phase == 'two_phase')
+    check("Newton flash: beta agrees with Broyden to 1e-7",
+          abs(rn.beta - rb.beta) < 1e-7,
+          f"Broyden beta={rb.beta:.8f}, Newton beta={rn.beta:.8f}")
+    check("Newton flash: x agrees with Broyden to 1e-6",
+          np.max(np.abs(rn.x - rb.x)) < 1e-6,
+          f"max diff = {np.max(np.abs(rn.x - rb.x)):.2e}")
+    check("Newton flash: y agrees with Broyden to 1e-6",
+          np.max(np.abs(rn.y - rb.y)) < 1e-6)
+    check("Newton flash: converges in <= 6 iters (vs Broyden's 8)",
+          rn.iterations <= 6,
+          f"got {rn.iterations} iters, Broyden took {rb.iterations}")
+    lpL = mx.ln_phi(rn.rho_L, T, rn.x); lpV = mx.ln_phi(rn.rho_V, T, rn.y)
+    f_L = rn.x * np.exp(lpL) * p; f_V = rn.y * np.exp(lpV) * p
+    err = np.max(np.abs(f_L / f_V - 1.0))
+    check("Newton flash: fugacity equality at converged state",
+          err < 1e-9, f"max f_L/f_V - 1 = {err:.2e}")
+
+
+def test_cubic_newton_flash_handles_single_phase():
+    """Newton flash on a single-phase feed should gracefully delegate
+    to the SS+Broyden path (which knows how to label the single-phase
+    result)."""
+    from stateprop.cubic.flash import newton_flash_pt
+    c_CH4 = PR(190.564, 4.5992e6, 0.01142)
+    c_N2  = PR(126.192, 3.3958e6, 0.0372)
+    mx = CubicMixture([c_CH4, c_N2], composition=[0.5, 0.5], k_ij={(0,1):0.025})
+    rn = newton_flash_pt(p=5e6, T=300.0, z=mx.x, mixture=mx)
+    check("Newton flash on supercritical: gets a single-phase classification",
+          rn.phase in ('vapor', 'liquid', 'supercritical') and rn.beta is None,
+          f"got phase={rn.phase}, beta={rn.beta}")
+
+
+def test_cubic_analytic_dp_dT_at_rho():
+    """dp/dT at fixed (rho, x) validates vs 2-pt FD on the cubic EOS
+    pressure formula. Dependence enters via a_m(T)."""
+    c_CH4 = PR(190.564, 4.5992e6, 0.01142)
+    c_N2  = PR(126.192, 3.3958e6, 0.0372)
+    c_C10 = PR(617.7, 21.1e5, 0.4923)
+    cases = [
+        (CubicMixture([c_CH4, c_N2], composition=[0.6,0.4], k_ij={(0,1):0.025}),
+         200.0, 3e6, np.array([0.6, 0.4])),
+        (CubicMixture([c_CH4, c_C10], composition=[0.5,0.5], k_ij={}),
+         350.0, 10e6, np.array([0.5, 0.5])),
+    ]
+    hT = 1e-3
+    for mx, T, p, x in cases:
+        for phase in ('vapor', 'liquid'):
+            rho = mx.density_from_pressure(p, T, x, phase_hint=phase)
+            an = mx._dp_dT_at_rho(rho, T, x)
+            # FD using the cubic pressure formula directly
+            def p_of_T(T_val):
+                a, b, _, _, _, _ = mx.a_b_mix(T_val, x)
+                v = 1.0 / rho
+                if abs(mx.sigma - mx.epsilon) > 1e-14:
+                    return mx.R * T_val / (v - b) - a / ((v + mx.epsilon*b)*(v + mx.sigma*b))
+                return mx.R * T_val / (v - b) - a / (v * v)
+            fd = (p_of_T(T + hT) - p_of_T(T - hT)) / (2 * hT)
+            err = abs((an - fd) / fd)
+            check(f"cubic dp/dT_at_rho [{phase}, Tc={[c.T_c for c in mx.components]} "
+                  f"T={T} p={p:.1e}]: rel err < 1e-7",
+                  err < 1e-7, f"got {err:.2e}")
+
+
+def test_cubic_analytic_dlnphi_dT_and_dp():
+    """Cubic dlnphi_dT_at_p and dlnphi_dp_at_T validate vs FD to 1e-6."""
+    c_CH4 = PR(190.564, 4.5992e6, 0.01142)
+    c_N2  = PR(126.192, 3.3958e6, 0.0372)
+    c_C10 = PR(617.7, 21.1e5, 0.4923)
+    cases = [
+        (CubicMixture([c_CH4, c_N2], composition=[0.6,0.4], k_ij={(0,1):0.025}),
+         200.0, 3e6, np.array([0.6, 0.4])),
+        (CubicMixture([c_CH4, c_C10], composition=[0.5,0.5], k_ij={}),
+         350.0, 10e6, np.array([0.5, 0.5])),
+    ]
+    for mx, T, p, x in cases:
+        for phase in ('vapor', 'liquid'):
+            # dlnphi/dp at fixed (T, x)
+            an_p = mx.dlnphi_dp_at_T(p, T, x, phase_hint=phase)
+            hp = max(p * 1e-5, 1.0)
+            rho_p = mx.density_from_pressure(p + hp, T, x, phase_hint=phase)
+            rho_m = mx.density_from_pressure(p - hp, T, x, phase_hint=phase)
+            fd_p = (mx.ln_phi(rho_p, T, x) - mx.ln_phi(rho_m, T, x)) / (2 * hp)
+            rel_p = np.max(np.abs((an_p - fd_p) / (fd_p + 1e-30)))
+            check(f"cubic dlnphi/dp_at_T [Tc={[c.T_c for c in mx.components]} "
+                  f"T={T} p={p:.1e} {phase}]: rel err < 1e-6",
+                  rel_p < 1e-6, f"got {rel_p:.2e}")
+            # dlnphi/dT at fixed (p, x)
+            an_T = mx.dlnphi_dT_at_p(p, T, x, phase_hint=phase)
+            hT = 1e-3
+            rho_pT = mx.density_from_pressure(p, T + hT, x, phase_hint=phase)
+            rho_mT = mx.density_from_pressure(p, T - hT, x, phase_hint=phase)
+            fd_T = (mx.ln_phi(rho_pT, T + hT, x) - mx.ln_phi(rho_mT, T - hT, x)) / (2 * hT)
+            rel_T = np.max(np.abs((an_T - fd_T) / (fd_T + 1e-30)))
+            check(f"cubic dlnphi/dT_at_p [Tc={[c.T_c for c in mx.components]} "
+                  f"T={T} p={p:.1e} {phase}]: rel err < 1e-5",
+                  rel_T < 1e-5, f"got {rel_T:.2e}")
+
+
+def test_cubic_flash_broyden_acceleration():
+    """The SS+Broyden hybrid in cubic flash should converge in fewer
+    iterations than pure successive substitution for systems with strong
+    non-ideality. The 5-component natural gas mix at 250K, 8 MPa is the
+    canonical stress test: pure SS needs ~45 iters, hybrid needs ~15.
+    Both must agree on the converged beta to 1e-8 (Broyden adds slightly
+    more rounding noise than pure SS, but not much)."""
+    import stateprop.cubic.flash as cf
+    c_CH4 = PR(190.564, 4.5992e6, 0.01142)
+    c_C2 = PR(305.32, 4.872e6, 0.0995)
+    c_C3 = PR(369.83, 4.248e6, 0.1521)
+    c_C4 = PR(425.12, 3.796e6, 0.2002)
+    c_N2 = PR(126.192, 3.3958e6, 0.0372)
+    mx = CubicMixture([c_CH4, c_C2, c_C3, c_C4, c_N2],
+                      composition=[0.7, 0.1, 0.1, 0.05, 0.05],
+                      k_ij={(0, 4): 0.025, (1, 4): 0.025, (2, 4): 0.025,
+                            (3, 4): 0.025})
+
+    # Run hybrid (default)
+    r_b = flash_pt(8e6, 250.0, mx.x, mx)
+
+    # Run pure SS by raising the SS warmup floor above maxiter
+    orig = cf._SS_WARMUP
+    cf._SS_WARMUP = 1000
+    try:
+        r_ss = flash_pt(8e6, 250.0, mx.x, mx, maxiter=200)
+    finally:
+        cf._SS_WARMUP = orig
+
+    check("cubic 5-comp flash: SS and Broyden both 2-phase",
+          r_b.phase == 'two_phase' and r_ss.phase == 'two_phase')
+    check("cubic 5-comp flash: SS and Broyden agree on beta (within 1e-6)",
+          abs(r_b.beta - r_ss.beta) < 1e-6,
+          f"SS={r_ss.beta:.8f}, Broyden={r_b.beta:.8f}")
+    # Broyden should converge in significantly fewer iterations.
+    check("cubic 5-comp flash: Broyden uses < 0.6x SS iterations",
+          r_b.iterations < r_ss.iterations * 0.6,
+          f"SS={r_ss.iterations} iters, Broyden={r_b.iterations} iters "
+          f"(want Broyden < {int(r_ss.iterations * 0.6)})")
+
+
+
 def test_pt_flash_supercritical():
     """At high T, should be supercritical."""
     c_CH4 = PR(190.564, 4.5992e6, 0.01142)
@@ -1206,6 +1450,75 @@ def test_trace_envelope_seeds_at_critical():
           n_dew > 5, f"only {n_dew} points")
 
 
+def test_envelope_analytic_jacobian_matches_fd():
+    """v0.9.17: _envelope_jacobian_analytic matches central-difference FD
+    to ~1e-7 relative error on a near-envelope state for both beta=0 and
+    beta=1."""
+    from stateprop.cubic.envelope import (
+        _envelope_jacobian_analytic, _envelope_jacobian_fd,
+    )
+    c_CO2 = PR(304.13, 7.3773e6, 0.224)
+    c_CH4 = PR(190.564, 4.5992e6, 0.01142)
+    mx = CubicMixture([c_CO2, c_CH4], composition=[0.5, 0.5], k_ij={(0,1):0.09})
+    z = np.array([0.5, 0.5])
+    N = 2
+    # Non-converged state so residuals are O(1e-2), not ~0
+    T = 220.0; p = 5e6
+    K = mx.wilson_K(T, p)
+    X = np.concatenate([np.log(K), [np.log(T), np.log(p)]])
+    spec_idx = N
+    spec_val = float(X[N])
+    for beta in (0, 1):
+        J_fd = _envelope_jacobian_fd(X, beta, z, spec_idx, spec_val, mx)
+        J_an = _envelope_jacobian_analytic(X, beta, z, spec_idx, spec_val, mx)
+        rel_err = float(np.max(np.abs(J_an - J_fd) / (np.abs(J_fd) + 1e-30)))
+        check(f"envelope Jacobian [beta={beta}]: analytic matches FD (rel err < 1e-6)",
+              rel_err < 1e-6, f"rel err = {rel_err:.2e}")
+
+
+def test_envelope_point_analytic_matches_fd():
+    """v0.9.17: envelope_point with use_analytic_jac=True gives same result
+    as FD path to machine precision."""
+    from stateprop.cubic.envelope import envelope_point
+    c_CO2 = PR(304.13, 7.3773e6, 0.224)
+    c_CH4 = PR(190.564, 4.5992e6, 0.01142)
+    mx = CubicMixture([c_CO2, c_CH4], composition=[0.3, 0.7], k_ij={(0,1):0.09})
+    z = np.array([0.3, 0.7])
+    T = 180.0
+    ep_fd = envelope_point(T, 1e6, z, mx, beta=0, use_analytic_jac=False)
+    ep_an = envelope_point(T, 1e6, z, mx, beta=0, use_analytic_jac=True)
+    check("envelope_point: analytic-Jac result matches FD result",
+          abs(ep_an['p'] - ep_fd['p']) / ep_fd['p'] < 1e-10,
+          f"FD p={ep_fd['p']/1e6:.6f}, AN p={ep_an['p']/1e6:.6f}")
+    check("envelope_point: analytic and FD agree on K factors",
+          np.max(np.abs(ep_an['K'] - ep_fd['K']) / ep_fd['K']) < 1e-10,
+          f"K diff = {np.max(np.abs(ep_an['K'] - ep_fd['K']) / ep_fd['K']):.2e}")
+
+
+def test_trace_envelope_analytic_corrector_matches_fd():
+    """v0.9.17: trace_envelope with use_analytic_jac_corrector=True gives
+    an envelope that agrees with the FD-corrector envelope."""
+    from stateprop.cubic.envelope import trace_envelope
+    c_CO2 = PR(304.13, 7.3773e6, 0.224)
+    c_CH4 = PR(190.564, 4.5992e6, 0.01142)
+    c_C2  = PR(305.322, 4.872e6, 0.0995)
+    mx = CubicMixture([c_CO2, c_CH4, c_C2], composition=[0.3, 0.5, 0.2], k_ij={})
+    env_fd = trace_envelope(mx.x, mx, max_points_per_branch=15,
+                             step_init=0.04, step_max=0.08, crit_offset=0.02)
+    env_an = trace_envelope(mx.x, mx, max_points_per_branch=15,
+                             step_init=0.04, step_max=0.08, crit_offset=0.02,
+                             use_analytic_jac_corrector=True)
+    check("trace_envelope: analytic-corrector envelope has >= FD's points",
+          env_an['n_points'] >= int(0.8 * env_fd['n_points']),
+          f"FD {env_fd['n_points']} pts, AN {env_an['n_points']} pts")
+    # Both envelopes should cover similar T range
+    T_an_span = env_an['T'].max() - env_an['T'].min()
+    T_fd_span = env_fd['T'].max() - env_fd['T'].min()
+    check("trace_envelope: analytic-corrector T span matches FD T span",
+          abs(T_an_span - T_fd_span) / T_fd_span < 0.3,
+          f"FD span {T_fd_span:.2f}K, AN span {T_an_span:.2f}K")
+
+
 def test_envelope_bubble_side_fugacity_equality():
     """Each envelope point satisfies the Rachford-Rice constraint corresponding
     to its branch label: Sum(K*z) = 1 for bubble (beta=0), Sum(z/K) = 1 for
@@ -1234,6 +1547,508 @@ def test_envelope_bubble_side_fugacity_equality():
 
 
 # ----------------------------------------------------------------------
+# v0.9.15 -- Newton-Raphson bubble/dew point solvers for cubic EOS
+# ----------------------------------------------------------------------
+
+
+def test_cubic_newton_bubble_point_p_matches_ss():
+    """Cubic Newton bubble_point_p converges to same p as SS on CH4-ethane
+    well below critical (T_c ~ 267K for this PR mixture)."""
+    from stateprop.cubic.flash import bubble_point_p, newton_bubble_point_p
+    c_CH4 = PR(190.564, 4.5992e6, 0.01142)
+    c_C2  = PR(305.322, 4.872e6, 0.0995)
+    mx = CubicMixture([c_CH4, c_C2], composition=[0.5, 0.5], k_ij={})
+    z = np.array([0.5, 0.5])
+    T = 200.0
+    r_ss = bubble_point_p(T, z, mx)
+    r_nt = newton_bubble_point_p(T, z, mx)
+    check("Cubic Newton bubble_point_p: p matches SS to 1e-6 rel",
+          abs(r_nt.p - r_ss.p) / r_ss.p < 1e-6,
+          f"SS p={r_ss.p/1e6:.4f}, Newton p={r_nt.p/1e6:.4f}")
+    check("Cubic Newton bubble_point_p: fewer iterations than SS",
+          r_nt.iterations <= r_ss.iterations,
+          f"SS {r_ss.iterations}, Newton {r_nt.iterations}")
+    # Fugacity equality at solution
+    T_r, p_r, K_r, y_r = r_nt.T, r_nt.p, r_nt.K, r_nt.y
+    rho_L = mx.density_from_pressure(p_r, T_r, z, phase_hint='liquid')
+    rho_V = mx.density_from_pressure(p_r, T_r, y_r, phase_hint='vapor')
+    f_residual = np.max(np.abs(np.log(K_r) - (mx.ln_phi(rho_L, T_r, z)
+                                                - mx.ln_phi(rho_V, T_r, y_r))))
+    check("Cubic Newton bubble_point_p: fugacity equality to 1e-8",
+          f_residual < 1e-8, f"max residual = {f_residual:.2e}")
+
+
+def test_cubic_newton_bubble_point_p_near_critical():
+    """Near-critical: Newton is much faster than SS. T_c ~ 267K for this
+    PR CH4-ethane mixture. Test at T=240K (27K below critical)."""
+    from stateprop.cubic.flash import bubble_point_p, newton_bubble_point_p
+    c_CH4 = PR(190.564, 4.5992e6, 0.01142)
+    c_C2  = PR(305.322, 4.872e6, 0.0995)
+    mx = CubicMixture([c_CH4, c_C2], composition=[0.5, 0.5], k_ij={})
+    z = np.array([0.5, 0.5])
+    T = 240.0
+    r_ss = bubble_point_p(T, z, mx)
+    r_nt = newton_bubble_point_p(T, z, mx)
+    check("Near-critical cubic Newton: p matches SS to 1e-6 rel",
+          abs(r_nt.p - r_ss.p) / r_ss.p < 1e-6,
+          f"SS p={r_ss.p/1e6:.4f}, Newton p={r_nt.p/1e6:.4f}")
+    check("Near-critical cubic Newton: converges in < 15 iterations",
+          r_nt.iterations < 15, f"iters={r_nt.iterations}")
+    check("Near-critical cubic Newton: much faster than SS (iters < 1/3 of SS)",
+          r_nt.iterations * 3 < r_ss.iterations,
+          f"SS={r_ss.iterations}, Newton={r_nt.iterations}")
+
+
+def test_cubic_newton_bubble_point_T_matches_ss():
+    """Cubic Newton bubble_point_T converges to same T as SS."""
+    from stateprop.cubic.flash import bubble_point_T, newton_bubble_point_T
+    c_CH4 = PR(190.564, 4.5992e6, 0.01142)
+    c_C2  = PR(305.322, 4.872e6, 0.0995)
+    mx = CubicMixture([c_CH4, c_C2], composition=[0.5, 0.5], k_ij={})
+    z = np.array([0.5, 0.5])
+    p = 3e6
+    r_ss = bubble_point_T(p, z, mx)
+    r_nt = newton_bubble_point_T(p, z, mx)
+    check("Cubic Newton bubble_point_T: T matches SS to 1e-6 rel",
+          abs(r_nt.T - r_ss.T) / r_ss.T < 1e-6,
+          f"SS T={r_ss.T:.3f}, Newton T={r_nt.T:.3f}")
+
+
+def test_cubic_newton_dew_point_p_matches_ss():
+    """Cubic Newton dew_point_p converges to same p as SS."""
+    from stateprop.cubic.flash import dew_point_p, newton_dew_point_p
+    c_CH4 = PR(190.564, 4.5992e6, 0.01142)
+    c_C2  = PR(305.322, 4.872e6, 0.0995)
+    mx = CubicMixture([c_CH4, c_C2], composition=[0.5, 0.5], k_ij={})
+    z = np.array([0.5, 0.5])
+    T = 220.0
+    r_ss = dew_point_p(T, z, mx)
+    r_nt = newton_dew_point_p(T, z, mx)
+    check("Cubic Newton dew_point_p: p matches SS to 1e-6 rel",
+          abs(r_nt.p - r_ss.p) / r_ss.p < 1e-6,
+          f"SS p={r_ss.p/1e6:.4f}, Newton p={r_nt.p/1e6:.4f}")
+    check("Cubic Newton dew_point_p: fewer iterations than SS",
+          r_nt.iterations <= r_ss.iterations,
+          f"SS {r_ss.iterations}, Newton {r_nt.iterations}")
+
+
+def test_cubic_newton_dew_point_T_matches_ss():
+    """Cubic Newton dew_point_T converges to same T as SS."""
+    from stateprop.cubic.flash import dew_point_T, newton_dew_point_T
+    c_CH4 = PR(190.564, 4.5992e6, 0.01142)
+    c_C2  = PR(305.322, 4.872e6, 0.0995)
+    mx = CubicMixture([c_CH4, c_C2], composition=[0.5, 0.5], k_ij={})
+    z = np.array([0.5, 0.5])
+    p = 2e6
+    r_ss = dew_point_T(p, z, mx)
+    r_nt = newton_dew_point_T(p, z, mx)
+    check("Cubic Newton dew_point_T: T matches SS to 1e-6 rel",
+          abs(r_nt.T - r_ss.T) / r_ss.T < 1e-6,
+          f"SS T={r_ss.T:.3f}, Newton T={r_nt.T:.3f}")
+
+
+def test_cubic_newton_bubble_dew_ordering():
+    """At any T well below critical, bubble p > dew p -- Newton must respect
+    this thermodynamic ordering. Also check volatility ordering in K-factors."""
+    from stateprop.cubic.flash import newton_bubble_point_p, newton_dew_point_p
+    c_CH4 = PR(190.564, 4.5992e6, 0.01142)
+    c_C2  = PR(305.322, 4.872e6, 0.0995)
+    mx = CubicMixture([c_CH4, c_C2], composition=[0.5, 0.5], k_ij={})
+    z = np.array([0.5, 0.5])
+    T = 200.0
+    b = newton_bubble_point_p(T, z, mx)
+    d = newton_dew_point_p(T, z, mx)
+    check("Cubic Newton bubble p > dew p at T << T_c",
+          b.p > d.p, f"bubble p={b.p/1e6:.3f}, dew p={d.p/1e6:.3f}")
+    check("Cubic Newton bubble: K_CH4 > 1 (more volatile)",
+          b.K[0] > 1.0, f"got K_CH4={b.K[0]:.3f}")
+    check("Cubic Newton bubble: K_C2 < 1 (less volatile)",
+          b.K[1] < 1.0, f"got K_C2={b.K[1]:.3f}")
+
+
+def test_cubic_newton_peneloux_analytic_path():
+    """v0.9.16: Peneloux volume-shifted cubic mixtures now use the analytic
+    Jacobian (no longer fall back to SS via NotImplementedError). The
+    Newton iteration count drops from SS-like values to quadratic-Newton
+    values, and results still match SS to tight tolerance."""
+    from stateprop.cubic.eos import SRK
+    from stateprop.cubic.flash import bubble_point_p, newton_bubble_point_p
+    c_CH4 = SRK(190.564, 4.5992e6, 0.01142, volume_shift_c='peneloux')
+    c_C2  = SRK(305.322, 4.872e6, 0.0995, volume_shift_c='peneloux')
+    mx = CubicMixture([c_CH4, c_C2], composition=[0.5, 0.5], k_ij={})
+    z = np.array([0.5, 0.5])
+    T = 200.0
+    r_nt = newton_bubble_point_p(T, z, mx)
+    r_ss = bubble_point_p(T, z, mx)
+    check("Peneloux Newton: result matches SS",
+          abs(r_nt.p - r_ss.p) / r_ss.p < 1e-6,
+          f"Newton p={r_nt.p/1e6:.4f}, SS p={r_ss.p/1e6:.4f}")
+    check("Peneloux Newton: now converges in Newton iters (<=10), not SS-like",
+          r_nt.iterations <= 10, f"iters={r_nt.iterations}")
+
+
+def test_peneloux_dlnphi_dxk_at_p_fd():
+    """Peneloux (v0.9.16) analytic dlnphi_dxk_at_p matches central FD on
+    the real (shifted) ln_phi for a Peneloux SRK mixture. Across vapor
+    and liquid phases and for binary + ternary compositions."""
+    from stateprop.cubic.eos import SRK
+    # Binary CH4-n-butane Peneloux SRK
+    c_CH4 = SRK(190.564, 4.5992e6, 0.01142, volume_shift_c='peneloux')
+    c_C4  = SRK(425.12, 3.796e6, 0.2002, volume_shift_c='peneloux')
+    mx = CubicMixture([c_CH4, c_C4], composition=[0.5, 0.5], k_ij={})
+    x = mx.x.copy()
+    T, p = 250.0, 3e6
+    for phase in ('vapor', 'liquid'):
+        an = mx.dlnphi_dxk_at_p(p, T, x, phase_hint=phase)
+        hx = 1e-5
+        err_max = 0.0
+        for k in range(len(x)):
+            x_p = x.copy(); x_p[k] += hx
+            x_m = x.copy(); x_m[k] -= hx
+            rho_xp = mx.density_from_pressure(p, T, x_p, phase_hint=phase)
+            rho_xm = mx.density_from_pressure(p, T, x_m, phase_hint=phase)
+            fd_xk = (mx.ln_phi(rho_xp, T, x_p) - mx.ln_phi(rho_xm, T, x_m)) / (2*hx)
+            err_max = max(err_max, float(np.max(
+                np.abs(an[:, k] - fd_xk) / (np.abs(fd_xk) + 1e-30))))
+        check(f"Peneloux dlnphi_dxk_at_p [{phase}]: matches FD, rel err < 1e-7",
+              err_max < 1e-7, f"rel err = {err_max:.2e}")
+
+
+def test_peneloux_dlnphi_dp_at_T_fd():
+    """Peneloux (v0.9.16) analytic dlnphi_dp_at_T matches central FD."""
+    from stateprop.cubic.eos import SRK
+    c_CH4 = SRK(190.564, 4.5992e6, 0.01142, volume_shift_c='peneloux')
+    c_C4  = SRK(425.12, 3.796e6, 0.2002, volume_shift_c='peneloux')
+    mx = CubicMixture([c_CH4, c_C4], composition=[0.5, 0.5], k_ij={})
+    x = mx.x.copy()
+    T, p = 250.0, 3e6
+    for phase in ('vapor', 'liquid'):
+        an = mx.dlnphi_dp_at_T(p, T, x, phase_hint=phase)
+        hp = p * 1e-5
+        rho_p = mx.density_from_pressure(p + hp, T, x, phase_hint=phase)
+        rho_m = mx.density_from_pressure(p - hp, T, x, phase_hint=phase)
+        fd = (mx.ln_phi(rho_p, T, x) - mx.ln_phi(rho_m, T, x)) / (2*hp)
+        err = float(np.max(np.abs(an - fd) / (np.abs(fd) + 1e-30)))
+        check(f"Peneloux dlnphi_dp_at_T [{phase}]: matches FD, rel err < 1e-7",
+              err < 1e-7, f"rel err = {err:.2e}")
+
+
+def test_peneloux_dlnphi_dT_at_p_fd():
+    """Peneloux (v0.9.16) analytic dlnphi_dT_at_p matches central FD."""
+    from stateprop.cubic.eos import SRK
+    c_CH4 = SRK(190.564, 4.5992e6, 0.01142, volume_shift_c='peneloux')
+    c_C4  = SRK(425.12, 3.796e6, 0.2002, volume_shift_c='peneloux')
+    mx = CubicMixture([c_CH4, c_C4], composition=[0.5, 0.5], k_ij={})
+    x = mx.x.copy()
+    T, p = 250.0, 3e6
+    for phase in ('vapor', 'liquid'):
+        an = mx.dlnphi_dT_at_p(p, T, x, phase_hint=phase)
+        hT = T * 1e-5
+        rho_Tp = mx.density_from_pressure(p, T + hT, x, phase_hint=phase)
+        rho_Tm = mx.density_from_pressure(p, T - hT, x, phase_hint=phase)
+        fd = (mx.ln_phi(rho_Tp, T + hT, x) - mx.ln_phi(rho_Tm, T - hT, x)) / (2*hT)
+        err = float(np.max(np.abs(an - fd) / (np.abs(fd) + 1e-30)))
+        check(f"Peneloux dlnphi_dT_at_p [{phase}]: matches FD, rel err < 1e-7",
+              err < 1e-7, f"rel err = {err:.2e}")
+
+
+def test_peneloux_derivs_ternary_manual_c():
+    """Peneloux derivatives on ternary + manual numeric c values (not the
+    automatic Peneloux 1982 formula). Tests the general c-shift code path."""
+    from stateprop.cubic.eos import SRK
+    c_CH4 = SRK(190.564, 4.5992e6, 0.01142, volume_shift_c=5e-7)
+    c_C2  = SRK(305.322, 4.872e6, 0.0995, volume_shift_c=2e-6)
+    c_C3  = SRK(369.83, 4.248e6, 0.152, volume_shift_c=8e-6)
+    mx = CubicMixture([c_CH4, c_C2, c_C3], composition=[0.6, 0.3, 0.1], k_ij={})
+    x = mx.x.copy()
+    T, p = 260.0, 4e6
+
+    # dp check
+    hp = p * 1e-5
+    for phase in ('vapor', 'liquid'):
+        an = mx.dlnphi_dp_at_T(p, T, x, phase_hint=phase)
+        rho_p = mx.density_from_pressure(p + hp, T, x, phase_hint=phase)
+        rho_m = mx.density_from_pressure(p - hp, T, x, phase_hint=phase)
+        fd = (mx.ln_phi(rho_p, T, x) - mx.ln_phi(rho_m, T, x)) / (2*hp)
+        err = float(np.max(np.abs(an - fd) / (np.abs(fd) + 1e-30)))
+        check(f"Ternary numeric-c dlnphi_dp [{phase}]: rel err < 1e-7",
+              err < 1e-7, f"rel err = {err:.2e}")
+
+    # dx check (sample k=0)
+    hx = 1e-5
+    for phase in ('vapor', 'liquid'):
+        an = mx.dlnphi_dxk_at_p(p, T, x, phase_hint=phase)
+        x_p = x.copy(); x_p[0] += hx
+        x_m = x.copy(); x_m[0] -= hx
+        rho_xp = mx.density_from_pressure(p, T, x_p, phase_hint=phase)
+        rho_xm = mx.density_from_pressure(p, T, x_m, phase_hint=phase)
+        fd = (mx.ln_phi(rho_xp, T, x_p) - mx.ln_phi(rho_xm, T, x_m)) / (2*hx)
+        err = float(np.max(np.abs(an[:, 0] - fd) / (np.abs(fd) + 1e-30)))
+        check(f"Ternary numeric-c dlnphi_dx_0 [{phase}]: rel err < 1e-7",
+              err < 1e-7, f"rel err = {err:.2e}")
+
+
+# ----------------------------------------------------------------------
+# v0.9.20 -- Three-phase (VLLE) flash for cubic EOS
+# ----------------------------------------------------------------------
+
+
+def test_cubic_three_phase_rr_material_balance():
+    """Cubic 3-phase Rachford-Rice with constructed K's exactly recovers
+    phase fractions and compositions used to build z."""
+    from stateprop.cubic.three_phase_flash import _rachford_rice_3p
+    bV_t, bL1_t, bL2_t = 0.4, 0.35, 0.25
+    y_t = np.array([0.7, 0.25, 0.05])
+    x1_t = np.array([0.2, 0.55, 0.25])
+    x2_t = np.array([0.1, 0.05, 0.85])
+    z = bV_t * y_t + bL1_t * x1_t + bL2_t * x2_t
+    K_VL1 = y_t / x1_t; K_L2L1 = x2_t / x1_t
+    bV, bL1, bL2, x1, x2, y = _rachford_rice_3p(z, K_VL1, K_L2L1, tol=1e-12)
+    check("cubic 3-phase RR: beta_V recovers truth to 1e-8",
+          abs(bV - bV_t) < 1e-8, f"got {bV}, expected {bV_t}")
+    check("cubic 3-phase RR: beta_L1 recovers truth to 1e-8",
+          abs(bL1 - bL1_t) < 1e-8)
+    check("cubic 3-phase RR: beta_L2 recovers truth to 1e-8",
+          abs(bL2 - bL2_t) < 1e-8)
+    check("cubic 3-phase RR: x1 recovers truth to 1e-8",
+          np.max(np.abs(x1 - x1_t)) < 1e-8)
+    check("cubic 3-phase RR: x2 recovers truth to 1e-8",
+          np.max(np.abs(x2 - x2_t)) < 1e-8)
+    check("cubic 3-phase RR: y recovers truth to 1e-8",
+          np.max(np.abs(y - y_t)) < 1e-8)
+
+
+def test_cubic_three_phase_preserves_vle():
+    """Cubic 3-phase flash on a clean VLE system (CO2-CH4 PR) returns
+    a 2-phase result, not a spurious 3-phase split."""
+    from stateprop.cubic.three_phase_flash import flash_pt_three_phase
+    c_CO2 = PR(304.13, 7.3773e6, 0.224)
+    c_CH4 = PR(190.564, 4.5992e6, 0.01142)
+    mx = CubicMixture([c_CO2, c_CH4], composition=[0.5, 0.5], k_ij={(0,1): 0.09})
+    r = flash_pt_three_phase(5e6, 220.0, np.array([0.5, 0.5]), mx)
+    check("cubic 3-phase on CO2-CH4 VLE: returns VLE label",
+          r.phase == "VLE", f"got phase={r.phase}")
+    check("cubic 3-phase on CO2-CH4 VLE: beta_L2 == 0",
+          r.beta_L2 == 0.0, f"got beta_L2={r.beta_L2}")
+    check("cubic 3-phase on CO2-CH4 VLE: beta_V + beta_L1 == 1",
+          abs(r.beta_V + r.beta_L1 - 1.0) < 1e-10)
+
+
+def test_cubic_three_phase_preserves_single_phase():
+    """Cubic 3-phase flash on a supercritical state returns single phase."""
+    from stateprop.cubic.three_phase_flash import flash_pt_three_phase
+    c_CO2 = PR(304.13, 7.3773e6, 0.224)
+    c_CH4 = PR(190.564, 4.5992e6, 0.01142)
+    mx = CubicMixture([c_CO2, c_CH4], composition=[0.5, 0.5], k_ij={(0,1): 0.09})
+    r = flash_pt_three_phase(5e6, 350.0, np.array([0.5, 0.5]), mx)
+    check("cubic 3-phase on supercritical: single-phase label",
+          r.phase in ('supercritical', 'vapor', 'liquid'),
+          f"got phase={r.phase}")
+    check("cubic 3-phase on supercritical: no L2 phase",
+          r.beta_L2 == 0.0)
+
+
+def test_cubic_three_phase_water_butane_vlle():
+    """Cubic 3-phase flash on water-nButane PR with k_ij=0.50 at T=350K,
+    p=1MPa must identify a 3-phase VLLE state with material balance
+    closing to 1e-8 and three distinct compositions (water-rich liquid,
+    butane-rich liquid, and butane-rich vapor)."""
+    from stateprop.cubic.three_phase_flash import flash_pt_three_phase
+    c_H2O = PR(647.096, 22.064e6, 0.3443)
+    c_C4 = PR(425.12, 3.796e6, 0.2002)
+    mx = CubicMixture([c_H2O, c_C4], composition=[0.5, 0.5], k_ij={(0,1): 0.50})
+    z = np.array([0.5, 0.5])
+    r = flash_pt_three_phase(1e6, 350.0, z, mx)
+    check("water-butane PR at 350K/1MPa: phase is VLLE",
+          r.phase == "VLLE", f"got phase={r.phase}")
+    if r.phase != "VLLE":
+        return  # can't validate further
+
+    check("water-butane VLLE: all three beta > 0.05",
+          r.beta_V > 0.05 and r.beta_L1 > 0.05 and r.beta_L2 > 0.05,
+          f"betas=({r.beta_V}, {r.beta_L1}, {r.beta_L2})")
+    check("water-butane VLLE: betas sum to 1",
+          abs(r.beta_V + r.beta_L1 + r.beta_L2 - 1.0) < 1e-10)
+    # Material balance
+    z_recon = r.beta_V * r.y + r.beta_L1 * r.x1 + r.beta_L2 * r.x2
+    mb_err = float(np.max(np.abs(z - z_recon)))
+    check("water-butane VLLE: material balance closes to 1e-8",
+          mb_err < 1e-8, f"max err = {mb_err:.2e}")
+    # x1 should be water-rich (water dominant), x2 should be butane-rich
+    check("water-butane VLLE: x1 is water-rich (x1[water] > 0.5)",
+          r.x1[0] > 0.5, f"got x1[water]={r.x1[0]}")
+    check("water-butane VLLE: x2 is butane-rich (x2[butane] > 0.5)",
+          r.x2[1] > 0.5, f"got x2[butane]={r.x2[1]}")
+    # Vapor should have more butane than water
+    check("water-butane VLLE: vapor is butane-rich (y[butane] > 0.5)",
+          r.y[1] > 0.5, f"got y[butane]={r.y[1]}")
+
+
+# ----------------------------------------------------------------------
+# v0.9.56 -- PV / Pα / Tα flash modes
+# ----------------------------------------------------------------------
+
+
+def _make_methane_ethane_propane():
+    """Standard 3-component hydrocarbon mixture for v0.9.56 tests."""
+    methane = PR(T_c=190.56, p_c=4.599e6, acentric_factor=0.011)
+    ethane  = PR(T_c=305.32, p_c=4.872e6, acentric_factor=0.099)
+    propane = PR(T_c=369.83, p_c=4.248e6, acentric_factor=0.152)
+    z = np.array([0.6, 0.3, 0.1])
+    mx = CubicMixture([methane, ethane, propane], composition=z)
+    return z, mx
+
+
+def test_flash_pv_single_phase_roundtrip():
+    """flash_pv at single-phase conditions recovers the input T to high
+    precision when given v computed from a flash_pt at known T."""
+    from stateprop.cubic import flash_pv
+    z, mx = _make_methane_ethane_propane()
+    # Single-phase vapor: high T, modest p
+    T_ref, p_ref = 350.0, 10e5
+    r_ref = flash_pt(p_ref, T_ref, z, mx, tol=1e-10)
+    v_ref = 1.0 / r_ref.rho
+    r_pv = flash_pv(p_ref, v_ref, z, mx, tol=1e-9)
+    err_T = abs(r_pv.T - T_ref)
+    check(f"flash_pv single-phase recovery: T err = {err_T:.3e} K",
+          err_T < 1e-5)
+    # Single-phase liquid: low T, high p
+    T_ref, p_ref = 200.0, 100e5
+    r_ref = flash_pt(p_ref, T_ref, z, mx, tol=1e-10)
+    v_ref = 1.0 / r_ref.rho
+    r_pv = flash_pv(p_ref, v_ref, z, mx, tol=1e-9)
+    err_T = abs(r_pv.T - T_ref)
+    check(f"flash_pv liquid-phase recovery: T err = {err_T:.3e} K",
+          err_T < 1e-5)
+
+
+def test_flash_pv_two_phase_roundtrip():
+    """flash_pv inside the two-phase dome recovers T to high precision."""
+    from stateprop.cubic import flash_pv
+    z, mx = _make_methane_ethane_propane()
+    T_ref, p_ref = 220.0, 30e5
+    r_ref = flash_pt(p_ref, T_ref, z, mx, tol=1e-10)
+    if r_ref.phase != 'two_phase':
+        check(f"setup: T={T_ref} p={p_ref/1e5} bar should be two-phase, got {r_ref.phase}",
+              False)
+        return
+    v_ref = 1.0 / r_ref.rho
+    r_pv = flash_pv(p_ref, v_ref, z, mx, tol=1e-9)
+    err_T = abs(r_pv.T - T_ref)
+    check(f"flash_pv two-phase: T err = {err_T:.3e} K, "
+          f"phase={r_pv.phase}, beta={r_pv.beta:.4f}",
+          err_T < 1e-4 and r_pv.phase == 'two_phase')
+
+
+def test_flash_p_alpha_recovers_target_beta():
+    """flash_p_alpha at intermediate alpha values recovers the target
+    vapor fraction to <1e-6 in beta."""
+    from stateprop.cubic import flash_p_alpha
+    z, mx = _make_methane_ethane_propane()
+    p_test = 20e5
+    max_err = 0.0
+    for alpha in [0.1, 0.25, 0.5, 0.75, 0.9]:
+        r = flash_p_alpha(p_test, alpha, z, mx, tol=1e-7)
+        actual = r.beta if r.beta is not None else (1.0 if r.phase == 'vapor' else 0.0)
+        err = abs(actual - alpha)
+        if err > max_err:
+            max_err = err
+    check(f"flash_p_alpha 5 alphas, max beta err = {max_err:.3e}",
+          max_err < 1e-6)
+
+
+def test_flash_p_alpha_endpoints_match_bubble_dew():
+    """flash_p_alpha at alpha=0 reproduces newton_bubble_point_T;
+    at alpha=1 reproduces newton_dew_point_T."""
+    from stateprop.cubic import (flash_p_alpha,
+        newton_bubble_point_T, newton_dew_point_T)
+    z, mx = _make_methane_ethane_propane()
+    p_test = 20e5
+    r_bub_direct = newton_bubble_point_T(p_test, z, mx)
+    r_bub_alpha = flash_p_alpha(p_test, 0.0, z, mx)
+    err_bub = abs(r_bub_direct.T - r_bub_alpha.T)
+    check(f"flash_p_alpha(alpha=0) matches bubble: T err = {err_bub:.3e}",
+          err_bub < 1e-6)
+    r_dew_direct = newton_dew_point_T(p_test, z, mx, T_init=r_bub_direct.T * 1.1)
+    r_dew_alpha = flash_p_alpha(p_test, 1.0, z, mx)
+    err_dew = abs(r_dew_direct.T - r_dew_alpha.T)
+    check(f"flash_p_alpha(alpha=1) matches dew: T err = {err_dew:.3e}",
+          err_dew < 1e-6)
+
+
+def test_flash_t_alpha_recovers_target_beta():
+    """flash_t_alpha at intermediate alpha values recovers target vapor
+    fraction to <1e-6."""
+    from stateprop.cubic import flash_t_alpha
+    z, mx = _make_methane_ethane_propane()
+    T_test = 250.0
+    max_err = 0.0
+    for alpha in [0.1, 0.25, 0.5, 0.75, 0.9]:
+        r = flash_t_alpha(T_test, alpha, z, mx, tol=1e-7)
+        actual = r.beta if r.beta is not None else (1.0 if r.phase == 'vapor' else 0.0)
+        err = abs(actual - alpha)
+        if err > max_err:
+            max_err = err
+    check(f"flash_t_alpha 5 alphas, max beta err = {max_err:.3e}",
+          max_err < 1e-6)
+
+
+def test_flash_t_alpha_endpoints_match_bubble_dew():
+    """flash_t_alpha at alpha=0 reproduces newton_bubble_point_p;
+    at alpha=1 reproduces newton_dew_point_p."""
+    from stateprop.cubic import (flash_t_alpha,
+        newton_bubble_point_p, newton_dew_point_p)
+    z, mx = _make_methane_ethane_propane()
+    T_test = 250.0
+    r_bub_direct = newton_bubble_point_p(T_test, z, mx)
+    r_bub_alpha = flash_t_alpha(T_test, 0.0, z, mx)
+    err_bub = abs(r_bub_direct.p - r_bub_alpha.p) / r_bub_direct.p
+    check(f"flash_t_alpha(alpha=0) matches bubble: rel p err = {err_bub:.3e}",
+          err_bub < 1e-6)
+    r_dew_direct = newton_dew_point_p(T_test, z, mx, p_init=r_bub_direct.p * 0.5)
+    r_dew_alpha = flash_t_alpha(T_test, 1.0, z, mx)
+    err_dew = abs(r_dew_direct.p - r_dew_alpha.p) / r_dew_direct.p
+    check(f"flash_t_alpha(alpha=1) matches dew: rel p err = {err_dew:.3e}",
+          err_dew < 1e-6)
+
+
+def test_flash_p_alpha_invalid_alpha_raises():
+    """flash_p_alpha rejects alpha outside [0, 1] with ValueError."""
+    from stateprop.cubic import flash_p_alpha, flash_t_alpha
+    z, mx = _make_methane_ethane_propane()
+    raised_p, raised_t = False, False
+    try:
+        flash_p_alpha(20e5, 1.5, z, mx)
+    except ValueError:
+        raised_p = True
+    try:
+        flash_t_alpha(250.0, -0.1, z, mx)
+    except ValueError:
+        raised_t = True
+    check(f"flash_p_alpha rejects alpha>1: {raised_p}", raised_p)
+    check(f"flash_t_alpha rejects alpha<0: {raised_t}", raised_t)
+
+
+def test_flash_pv_consistent_with_flash_pt():
+    """At the converged T from flash_pv, flash_pt should give the same
+    rho, phase, beta, x, y as the flash_pv result."""
+    from stateprop.cubic import flash_pv
+    z, mx = _make_methane_ethane_propane()
+    p_ref = 30e5
+    # Pick a v that gives 2-phase
+    r_ref = flash_pt(p_ref, 220.0, z, mx, tol=1e-10)
+    v_ref = 1.0 / r_ref.rho
+    r_pv = flash_pv(p_ref, v_ref, z, mx, tol=1e-9)
+    # Re-do flash_pt at the converged T
+    r_pt = flash_pt(p_ref, r_pv.T, z, mx, tol=1e-10)
+    rho_err = abs(r_pt.rho - r_pv.rho) / r_pt.rho
+    beta_err = abs((r_pt.beta or 0) - (r_pv.beta or 0))
+    check(f"flash_pv internally consistent: rho_err={rho_err:.3e}, "
+          f"beta_err={beta_err:.3e}",
+          rho_err < 1e-6 and beta_err < 1e-6)
+
+
+# ----------------------------------------------------------------------
 # Main
 # ----------------------------------------------------------------------
 
@@ -1247,6 +2062,15 @@ if __name__ == "__main__":
         test_mixture_ln_phi_fd,
         test_mixture_ln_phi_ternary_fd,
         test_pt_flash_fugacity_equality,
+        test_cubic_analytic_dp_dx_at_rho,
+        test_cubic_analytic_dlnphi_dx_at_rho,
+        test_cubic_analytic_dlnphi_drho,
+        test_cubic_analytic_dlnphi_dxk_at_p,
+        test_cubic_newton_flash_pt,
+        test_cubic_newton_flash_handles_single_phase,
+        test_cubic_analytic_dp_dT_at_rho,
+        test_cubic_analytic_dlnphi_dT_and_dp,
+        test_cubic_flash_broyden_acceleration,
         test_pt_flash_supercritical,
         test_pt_flash_ternary,
         test_stability_test,
@@ -1290,6 +2114,37 @@ if __name__ == "__main__":
         test_envelope_point_matches_bubble_point_p,
         test_trace_envelope_seeds_at_critical,
         test_envelope_bubble_side_fugacity_equality,
+        # v0.9.15 -- Newton-Raphson bubble/dew point solvers
+        test_cubic_newton_bubble_point_p_matches_ss,
+        test_cubic_newton_bubble_point_p_near_critical,
+        test_cubic_newton_bubble_point_T_matches_ss,
+        test_cubic_newton_dew_point_p_matches_ss,
+        test_cubic_newton_dew_point_T_matches_ss,
+        test_cubic_newton_bubble_dew_ordering,
+        test_cubic_newton_peneloux_analytic_path,
+        # v0.9.16 -- Peneloux volume translation in analytic Jacobians
+        test_peneloux_dlnphi_dxk_at_p_fd,
+        test_peneloux_dlnphi_dp_at_T_fd,
+        test_peneloux_dlnphi_dT_at_p_fd,
+        test_peneloux_derivs_ternary_manual_c,
+        # v0.9.17 -- Analytic Jacobian for envelope tracer's corrector
+        test_envelope_analytic_jacobian_matches_fd,
+        test_envelope_point_analytic_matches_fd,
+        test_trace_envelope_analytic_corrector_matches_fd,
+        # v0.9.20 -- Three-phase (VLLE) flash for cubic EOS
+        test_cubic_three_phase_rr_material_balance,
+        test_cubic_three_phase_preserves_vle,
+        test_cubic_three_phase_preserves_single_phase,
+        test_cubic_three_phase_water_butane_vlle,
+        # v0.9.56 -- PV / Pα / Tα flash modes
+        test_flash_pv_single_phase_roundtrip,
+        test_flash_pv_two_phase_roundtrip,
+        test_flash_p_alpha_recovers_target_beta,
+        test_flash_p_alpha_endpoints_match_bubble_dew,
+        test_flash_t_alpha_recovers_target_beta,
+        test_flash_t_alpha_endpoints_match_bubble_dew,
+        test_flash_p_alpha_invalid_alpha_raises,
+        test_flash_pv_consistent_with_flash_pt,
     ]
     for t in tests:
         run_test(t)

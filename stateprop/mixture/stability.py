@@ -167,11 +167,54 @@ def stability_test_TPD(z, T, p, mixture, tol=1e-8, maxiter=50, verbose=False):
         else:
             W = z / K_wilson.copy()
         phase_hint = direction
+        # Warm-start density cache for this trial direction. Across trial-phase
+        # iterations the composition y barely moves once we're past the first
+        # 2-3 iters, so the previous density is an excellent initial guess for
+        # the next density solve. This typically cuts each density solve from
+        # 5 Newton iters cold-start to 1-2 warm-started.
+        rho_W_prev = None
 
         trivial = False
         converged = False
 
-        for it in range(maxiter):
+        # Inner-loop solver: SS warm-up then Broyden's "good" method on ln W.
+        # Same accelerator pattern as the flash _successive_substitution: SS
+        # is robust globally but converges only linearly (rate ~|d lnphi/dW|);
+        # Broyden's secant updates achieve super-linear convergence at the
+        # same per-iter cost (one residual evaluation), so the trial-phase
+        # iteration drops from typical ~15-30 SS iters to ~6-10 hybrid iters
+        # for strongly non-ideal systems. Identity initialization H^0 = I
+        # makes the first Broyden step IS a SS step (since the SS update
+        # is exactly W_new = exp(d - lnphi_W) = exp(ln_W - F)), so there is
+        # no extra setup cost for the switchover.
+        SS_WARMUP = 4
+        N = len(z)
+
+        def _residual(W_curr):
+            """Returns (F, ln_W, y, rho_W, lnphi_W) at the current trial-phase
+            estimate W_curr, or None if density solve fails or W_curr is
+            unphysical. F = ln_W - (d - lnphi_W) is the residual to drive
+            to zero; the SS update is the special case W_new = exp(ln_W - F).
+            """
+            nonlocal rho_W_prev
+            S_ = W_curr.sum()
+            if S_ <= 0 or not np.all(np.isfinite(W_curr)):
+                return None
+            y_ = W_curr / S_
+            try:
+                rho_W_ = density_from_pressure(p, T, y_, mixture,
+                                               phase_hint=phase_hint,
+                                               rho_init=rho_W_prev)
+            except RuntimeError:
+                return None
+            rho_W_prev = rho_W_
+            lnphi_W_ = ln_phi(rho_W_, T, y_, mixture)
+            ln_W_ = np.log(W_curr + 1e-300)
+            F_ = ln_W_ - (d - lnphi_W_)
+            return F_, ln_W_, y_, rho_W_, lnphi_W_
+
+        # ---- SS warm-up phase ----
+        for it in range(min(SS_WARMUP, maxiter)):
             S = W.sum()
             if S <= 0 or not np.all(np.isfinite(W)):
                 break
@@ -182,21 +225,74 @@ def stability_test_TPD(z, T, p, mixture, tol=1e-8, maxiter=50, verbose=False):
                 trivial = True
                 break
 
-            try:
-                rho_W = density_from_pressure(p, T, y, mixture, phase_hint=phase_hint)
-            except RuntimeError:
+            res = _residual(W)
+            if res is None:
                 break
-            lnphi_W = ln_phi(rho_W, T, y, mixture)
+            F, ln_W, y, rho_W, lnphi_W = res
 
-            # Update
-            ln_W_new = d - lnphi_W
-            W_new = np.exp(ln_W_new)
-
-            if np.max(np.abs(np.log(W_new + 1e-300) - np.log(W + 1e-300))) < 1e-9:
-                W = W_new
+            if np.max(np.abs(F)) < 1e-9:
                 converged = True
                 break
-            W = W_new
+
+            # SS update: W_new = exp(d - lnphi_W) (equivalent to ln_W - F)
+            W = np.exp(d - lnphi_W)
+
+        # ---- Broyden phase ----
+        # Continue from where SS warm-up left off. Need F and ln_W consistent
+        # at the current W; re-evaluate (one extra call but keeps math clean).
+        if not converged and not trivial:
+            res = _residual(W)
+            if res is None:
+                # Fall through to break-out path below; W carries last good state
+                pass
+            else:
+                F, ln_W, y, rho_W, lnphi_W = res
+                if np.max(np.abs(F)) < 1e-9:
+                    converged = True
+                else:
+                    H = np.eye(N)
+                    F_prev = F.copy()
+                    ln_W_prev = ln_W.copy()
+                    for it in range(SS_WARMUP, maxiter):
+                        # Trivial-solution check on current W
+                        S = W.sum()
+                        if S > 0 and np.all(np.isfinite(W)):
+                            y_check = W / S
+                            if np.max(np.abs(y_check - z)) < 1e-5 and abs(S - 1.0) < 1e-4:
+                                trivial = True
+                                break
+
+                        # Broyden step: delta = -H @ F (with damping)
+                        delta = -H @ F_prev
+                        max_step = np.max(np.abs(delta))
+                        if max_step > 1.0:
+                            delta = delta / max_step
+                        ln_W = ln_W_prev + delta
+                        W = np.exp(ln_W)
+                        res = _residual(W)
+                        if res is None:
+                            # Fall back to one SS step from last good state and
+                            # reset H to identity. If SS step also fails, give
+                            # up on this trial direction.
+                            W = np.exp(d - lnphi_W)
+                            res = _residual(W)
+                            if res is None:
+                                break
+                            H = np.eye(N)
+                        F, ln_W, y, rho_W, lnphi_W = res
+                        if np.max(np.abs(F)) < 1e-9:
+                            converged = True
+                            break
+                        # Broyden's "good" rank-1 update of H
+                        s = ln_W - ln_W_prev
+                        y_vec = F - F_prev
+                        Hy = H @ y_vec
+                        sH = s @ H
+                        denom = s @ Hy
+                        if abs(denom) > 1e-30:
+                            H = H + np.outer(s - Hy, sH) / denom
+                        ln_W_prev = ln_W.copy()
+                        F_prev = F.copy()
 
         if trivial:
             if verbose:

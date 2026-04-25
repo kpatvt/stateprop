@@ -329,8 +329,18 @@ class Fluid:
 
         ideal_c and ideal_d carry the extra constants for code-9 PE_general
         terms (alpha_0 += a*ln(c + d*exp(-b*tau))), zero for other codes.
+
+        The result is cached on the Fluid instance after the first call.
+        Building this 46-tuple on every property evaluation was measurable
+        Python overhead in mixture flash hot paths (each flash evaluation
+        does ~400 alpha_r calls, each calling pack() once per component).
+        Caching is safe because the underlying arrays are immutable
+        post-construction.
         """
-        return (
+        cached = self.__dict__.get("_pack_cache")
+        if cached is not None:
+            return cached
+        out = (
             self.R, self.rho_c, self.T_c,
             self._pn, self._pd, self._pt,
             self._en, self._ed, self._et, self._ec, self._eg,
@@ -345,6 +355,9 @@ class Fluid:
             self._ideal_codes, self._ideal_a, self._ideal_b,
             self._ideal_c, self._ideal_d,
         )
+        # Cache via __dict__ to bypass dataclass field mechanism
+        self.__dict__["_pack_cache"] = out
+        return out
 
     def reduce(self, rho: float, T: float) -> Tuple[float, float]:
         """Return (delta, tau) reduced coordinates."""

@@ -42,6 +42,122 @@ class CubicFlashResult:
 
 
 # -------------------------------------------------------------------------
+# SS + Broyden hybrid solver, shared between flash and stability test
+# -------------------------------------------------------------------------
+#
+# Both the cubic two-phase PT flash and the cubic Michelsen stability test
+# solve a fixed-point equation of the form:
+#
+#     u_new = g(u)              (SS update)
+#
+# where u is either ln K (flash) or ln W (stability). Equivalently, they
+# drive the residual F(u) = u - g(u) to zero. Pure successive substitution
+# is linearly convergent at rate ~|d g / d u|; for strongly non-ideal
+# systems this rate approaches 1 and SS needs 25+ iterations to converge.
+#
+# Broyden's "good" method maintains a rank-1 secant approximation of the
+# inverse Jacobian H ≈ (∂F/∂u)^-1. Each iter costs the same as one SS step
+# (one residual evaluation), but convergence becomes super-linear after a
+# short warm-up phase. Initial H = I makes the first Broyden step IS a
+# pure SS step (since -H @ F = -F = u_old - g(u_old) - u_old + g(u_old)
+# wait let me redo: -F = -(u - g(u)) = g(u) - u, so u_new = u + (-F) =
+# g(u), the SS update). Zero setup overhead at the SS->Broyden handoff.
+#
+# This is the same accelerator added to the Helmholtz mixture flash in
+# v0.9.5 / v0.9.6; ported here for the cubic path in v0.9.7.
+
+_SS_WARMUP = 4          # SS iters before switching to Broyden
+
+
+def _ss_broyden_solve(u0, residual_fn, ss_step_fn, tol, maxiter):
+    """Solve F(u) = 0 via SS warm-up then Broyden's "good" method.
+
+    Parameters
+    ----------
+    u0 : ndarray, shape (N,)
+        Initial guess for u (typically ln K from Wilson, or ln W from
+        the stability test seed).
+    residual_fn : callable u -> (F, aux) | None
+        Returns (F, aux) where F is the residual vector and aux is any
+        extra state the caller wants to retain at convergence. Returns
+        None to signal a transient failure (e.g. density solve diverged).
+    ss_step_fn : callable (u, aux) -> u_new
+        Computes the pure-SS update from the current iterate's state.
+        Used both during the warm-up phase and as a fallback when a
+        Broyden step would otherwise stall.
+    tol : float
+        Convergence threshold on max |F|.
+    maxiter : int
+        Total iteration cap.
+
+    Returns
+    -------
+    (u, aux, niter, status) where status is one of:
+        "converged"  : ||F||_inf < tol
+        "maxiter"    : exhausted budget without converging
+        "failed"     : residual_fn returned None twice in a row
+    """
+    N = u0.shape[0]
+    u = u0.copy()
+    aux = None
+
+    # ---- SS warm-up ----
+    for it in range(min(_SS_WARMUP, maxiter)):
+        res = residual_fn(u)
+        if res is None:
+            return u, aux, it, "failed"
+        F, aux = res
+        if np.max(np.abs(F)) < tol:
+            return u, aux, it + 1, "converged"
+        u = ss_step_fn(u, aux)
+
+    # ---- Broyden phase ----
+    # Re-evaluate F at the post-SS-update u to get a state consistent for
+    # the secant updates.
+    res = residual_fn(u)
+    if res is None:
+        return u, aux, _SS_WARMUP, "failed"
+    F, aux = res
+    if np.max(np.abs(F)) < tol:
+        return u, aux, _SS_WARMUP + 1, "converged"
+
+    H = np.eye(N)                     # inverse Jacobian estimate
+    F_prev = F.copy()
+    u_prev = u.copy()
+    for it in range(_SS_WARMUP + 1, maxiter):
+        # Broyden step: delta = -H @ F (with damping)
+        delta = -H @ F_prev
+        max_step = np.max(np.abs(delta))
+        if max_step > 1.0:
+            delta = delta / max_step
+        u = u_prev + delta
+        res = residual_fn(u)
+        if res is None:
+            # Broyden step took us into a bad region. Fall back to one SS
+            # step from the last good state and reset H.
+            u = ss_step_fn(u_prev, aux)
+            res = residual_fn(u)
+            if res is None:
+                return u, aux, it, "failed"
+            H = np.eye(N)
+        F, aux = res
+        if np.max(np.abs(F)) < tol:
+            return u, aux, it + 1, "converged"
+        # Broyden's "good" rank-1 update: H_new = H + (s - Hy) sH / (sH y)
+        s = u - u_prev
+        y_vec = F - F_prev
+        Hy = H @ y_vec
+        sH = s @ H
+        denom = s @ Hy
+        if abs(denom) > 1e-30:
+            H = H + np.outer(s - Hy, sH) / denom
+        u_prev = u.copy()
+        F_prev = F.copy()
+
+    return u, aux, maxiter, "maxiter"
+
+
+# -------------------------------------------------------------------------
 # Michelsen TPD stability analysis
 # -------------------------------------------------------------------------
 
@@ -105,30 +221,103 @@ def stability_test_TPD(z, T, p, mixture, tol=1e-8, maxiter=50, verbose=False):
         trivial = False
         converged = False
 
-        for it in range(maxiter):
+        # Trial-phase iteration: SS warm-up then Broyden's "good" method
+        # on ln W. Same pattern as flash's _ss_broyden_solve, but with the
+        # extra trivial-solution check (y ~= z, S ~= 1) interleaved in
+        # both phases. Helps strongly non-ideal systems where pure SS
+        # would otherwise need 25+ iters; small overhead on mild systems.
+
+        def _residual(ln_W):
+            W_curr = np.exp(ln_W)
+            S_ = W_curr.sum()
+            if S_ <= 0 or not np.all(np.isfinite(W_curr)):
+                return None
+            y_ = W_curr / S_
+            try:
+                rho_W_ = mixture.density_from_pressure(p, T, y_, phase_hint=phase_hint)
+            except RuntimeError:
+                return None
+            lnphi_W_ = mixture.ln_phi(rho_W_, T, y_)
+            F_ = ln_W - (d - lnphi_W_)
+            return F_, (S_, y_, rho_W_, lnphi_W_)
+
+        def _ss_step(ln_W, aux):
+            S_, y_, rho_W_, lnphi_W_ = aux
+            return d - lnphi_W_
+
+        # Inline the SS+Broyden phases here rather than using the helper,
+        # because we need the trivial-solution check at every iteration
+        # (the helper has no hooks for that).
+        ln_W = np.log(W + 1e-300)
+
+        # SS warm-up
+        for it in range(min(_SS_WARMUP, maxiter)):
+            W = np.exp(ln_W)
             S = W.sum()
             if S <= 0 or not np.all(np.isfinite(W)):
                 break
             y = W / S
-
             if np.max(np.abs(y - z)) < 1e-5 and abs(S - 1.0) < 1e-4:
                 trivial = True
                 break
-
-            try:
-                rho_W = mixture.density_from_pressure(p, T, y, phase_hint=phase_hint)
-            except RuntimeError:
+            res = _residual(ln_W)
+            if res is None:
                 break
-            lnphi_W = mixture.ln_phi(rho_W, T, y)
-
-            ln_W_new = d - lnphi_W
-            W_new = np.exp(ln_W_new)
-
-            if np.max(np.abs(np.log(W_new + 1e-300) - np.log(W + 1e-300))) < 1e-9:
-                W = W_new
+            F, aux = res
+            if np.max(np.abs(F)) < 1e-9:
                 converged = True
                 break
-            W = W_new
+            ln_W = _ss_step(ln_W, aux)
+
+        # Broyden phase
+        if not converged and not trivial:
+            res = _residual(ln_W)
+            if res is None:
+                pass
+            else:
+                F, aux = res
+                if np.max(np.abs(F)) < 1e-9:
+                    converged = True
+                else:
+                    H = np.eye(len(z))
+                    F_prev = F.copy()
+                    ln_W_prev = ln_W.copy()
+                    for it in range(_SS_WARMUP + 1, maxiter):
+                        W = np.exp(ln_W)
+                        S = W.sum()
+                        if S > 0 and np.all(np.isfinite(W)):
+                            y_check = W / S
+                            if (np.max(np.abs(y_check - z)) < 1e-5
+                                    and abs(S - 1.0) < 1e-4):
+                                trivial = True
+                                break
+                        delta = -H @ F_prev
+                        max_step = np.max(np.abs(delta))
+                        if max_step > 1.0:
+                            delta = delta / max_step
+                        ln_W = ln_W_prev + delta
+                        res = _residual(ln_W)
+                        if res is None:
+                            ln_W = _ss_step(ln_W_prev, aux)
+                            res = _residual(ln_W)
+                            if res is None:
+                                break
+                            H = np.eye(len(z))
+                        F, aux = res
+                        if np.max(np.abs(F)) < 1e-9:
+                            converged = True
+                            break
+                        s = ln_W - ln_W_prev
+                        y_vec = F - F_prev
+                        Hy = H @ y_vec
+                        sH = s @ H
+                        denom = s @ Hy
+                        if abs(denom) > 1e-30:
+                            H = H + np.outer(s - Hy, sH) / denom
+                        ln_W_prev = ln_W.copy()
+                        F_prev = F.copy()
+
+        W = np.exp(ln_W)
 
         if trivial:
             if verbose:
@@ -227,52 +416,52 @@ def flash_pt(p, T, z, mixture, K_init=None, check_stability=True,
             )
         K_init = K_stab
 
-    # Two-phase SS iteration on K-factors
+    # Two-phase SS+Broyden iteration on K-factors. The hybrid converges
+    # in ~5-10 iters for typical cubic-EOS mixtures vs ~15-30 for pure SS
+    # on strongly non-ideal systems; same accelerator pattern as the
+    # Helmholtz mixture flash (added in v0.9.5).
     if K_init is None:
         K = mixture.wilson_K(T, p)
     else:
         K = K_init.copy()
 
-    for it in range(maxiter):
-        # Rachford-Rice for beta
-        beta, converged_rr = rachford_rice(z, K)
-
-        # Compositions at current beta
-        x = z / (1.0 + beta * (K - 1.0))
-        y = K * x
-
-        # Normalize
-        x = x / x.sum()
-        y = y / y.sum()
-
-        # Densities
+    def _residual(ln_K):
+        K_curr = np.exp(ln_K)
+        beta_, _ = rachford_rice(z, K_curr)
+        denom = 1.0 + beta_ * (K_curr - 1.0)
+        x_ = z / denom; x_ /= x_.sum()
+        y_ = K_curr * x_; y_ /= y_.sum()
         try:
-            rho_L = mixture.density_from_pressure(p, T, x, phase_hint='liquid')
-            rho_V = mixture.density_from_pressure(p, T, y, phase_hint='vapor')
-        except RuntimeError as e:
-            raise RuntimeError(f"density failure in flash iteration: {e}")
+            rho_L_ = mixture.density_from_pressure(p, T, x_, phase_hint='liquid')
+            rho_V_ = mixture.density_from_pressure(p, T, y_, phase_hint='vapor')
+        except RuntimeError:
+            return None
+        lnphi_L_ = mixture.ln_phi(rho_L_, T, x_)
+        lnphi_V_ = mixture.ln_phi(rho_V_, T, y_)
+        F_ = ln_K - (lnphi_L_ - lnphi_V_)
+        # aux carries the converged-state values the caller needs
+        return F_, (beta_, x_, y_, rho_L_, rho_V_, lnphi_L_, lnphi_V_)
 
-        lnphi_L = mixture.ln_phi(rho_L, T, x)
-        lnphi_V = mixture.ln_phi(rho_V, T, y)
+    def _ss_step(ln_K, aux):
+        # SS update on ln K: ln K_new = lnphi_L - lnphi_V
+        # (which makes the residual zero in one step if lnphi were
+        # composition-independent; in practice contracts at rate
+        # ~|d lnphi / d ln K|).
+        beta_, x_, y_, rho_L_, rho_V_, lnphi_L_, lnphi_V_ = aux
+        return lnphi_L_ - lnphi_V_
 
-        # K update: K_new = phi_L / phi_V = exp(lnphi_L - lnphi_V)
-        ln_K_new = lnphi_L - lnphi_V
-        K_new = np.exp(ln_K_new)
-
-        dK_max = np.max(np.abs(np.log(K_new + 1e-300) - np.log(K + 1e-300)))
-        K = K_new
-
-        if dK_max < tol:
-            break
-
-    # Final
-    beta, _ = rachford_rice(z, K)
-    x = z / (1.0 + beta * (K - 1.0))
-    y = K * x
-    x = x / x.sum()
-    y = y / y.sum()
-    rho_L = mixture.density_from_pressure(p, T, x, phase_hint='liquid')
-    rho_V = mixture.density_from_pressure(p, T, y, phase_hint='vapor')
+    ln_K, aux, it, status = _ss_broyden_solve(
+        np.log(K), _residual, _ss_step, tol, maxiter
+    )
+    if status == "failed":
+        raise RuntimeError(
+            f"flash iteration failed: density solve diverged at "
+            f"T={T}, p={p}, z={z}"
+        )
+    K = np.exp(ln_K)
+    # Helper returns aux from the converged residual evaluation, so we
+    # already have all the per-phase state -- no need to recompute.
+    beta, x, y, rho_L, rho_V, lnphi_L, lnphi_V = aux
 
     # Check for single-phase collapse: if x and y very similar, revert to single phase
     if np.max(np.abs(y - x)) < 1e-5:
@@ -286,7 +475,7 @@ def flash_pt(p, T, z, mixture, K_init=None, check_stability=True,
             phase=label, T=T, p=p, beta=None,
             x=z.copy(), y=z.copy(), z=z, rho=rho,
             rho_L=None, rho_V=None,
-            h=cal["h"], s=cal["s"], iterations=it + 1, K=K,
+            h=cal["h"], s=cal["s"], iterations=it, K=K,
         )
 
     # Overall density via volume-weighted
@@ -307,8 +496,150 @@ def flash_pt(p, T, z, mixture, K_init=None, check_stability=True,
         phase="two_phase", T=T, p=p, beta=beta,
         x=x, y=y, z=z, rho=rho_avg,
         rho_L=rho_L, rho_V=rho_V,
-        h=h_mix, s=s_mix, iterations=it + 1, K=K,
+        h=h_mix, s=s_mix, iterations=it, K=K,
     )
+
+
+# -------------------------------------------------------------------------
+# Newton-Raphson flash with analytic Jacobian (v0.9.8)
+# -------------------------------------------------------------------------
+#
+# Uses the analytic d(ln phi)/d x_k Jacobian (added in v0.9.8 to
+# CubicMixture.dlnphi_dxk_at_p) to build the full N x N Newton Jacobian
+# for the ln-K residual:
+#
+#     F_i(ln K) = ln K_i - (lnphi_L_i(x(K)) - lnphi_V_i(y(K)))
+#
+# Convergence is quadratic, typically 4-6 iterations from a Wilson
+# starting estimate vs 8-15 for Broyden. Per-iter cost is ~2x Broyden's
+# (one analytic Jacobian build per iter, where Broyden uses a rank-1
+# secant update), so walltime is roughly tied or slightly slower than
+# Broyden for the typical 2-5 component flash.
+#
+# Use this when:
+#   - You need guaranteed quadratic convergence (e.g. inside a trust-region
+#     solver, or when stepping along a phase envelope at small dT)
+#   - The problem is large (N >> 5), where Broyden's secant approximation
+#     fills in slowly enough that full-Newton wins on iter count
+#   - You're doing sensitivity analysis and want the converged Jacobian
+#     for free
+#
+# Use the default flash_pt() (SS+Broyden) when you just want a flash.
+
+def newton_flash_pt(p, T, z, mixture, K_init=None, check_stability=True,
+                    tol=1e-9, maxiter=30):
+    """Newton-Raphson PT flash on ln K with full analytic Jacobian.
+
+    Same interface as flash_pt; returns CubicFlashResult or raises if
+    not in the two-phase region. The Jacobian is assembled from
+    mixture.dlnphi_dxk_at_p (the analytic composition derivative of
+    ln phi at fixed T, p) chained through Rachford-Rice's beta(K)
+    via implicit differentiation:
+
+        d(beta)/dK_j = (z_j / D_j^2) / sum_m z_m (K_m-1)^2 / D_m^2
+        D_m = 1 + beta * (K_m - 1)
+        d(x_m)/dK_j = -z_m * [d(beta)/dK_j * (K_m-1) + beta * delta_mj] / D_m^2
+        d(y_m)/dK_j = delta_mj * x_m + K_m * d(x_m)/dK_j
+
+    The flash Jacobian is then:
+
+        J[i, j] = delta_ij + K_j * sum_m {dlnphi_V_dy[i,m] * dy_dK[m,j]
+                                       - dlnphi_L_dx[i,m] * dx_dK[m,j]}
+
+    where the K_j factor converts d/dK_j to d/d(ln K_j) (since the
+    Newton update is on ln K). Step damping caps ||delta_lnK||_inf at 1.0
+    to prevent overshoot when far from the solution.
+    """
+    z = np.asarray(z, dtype=np.float64); z = z / z.sum()
+    N = len(z)
+
+    # Stability pre-check (mirrors flash_pt's behavior)
+    if check_stability and K_init is None:
+        stable, K_stab, _ = stability_test_TPD(z, T, p, mixture)
+        if stable:
+            # Single phase -- delegate to the existing single-phase
+            # classification path in flash_pt by calling it directly.
+            return flash_pt(p, T, z, mixture, K_init=None, check_stability=True,
+                            tol=tol, maxiter=maxiter)
+        K = K_stab
+    elif K_init is not None:
+        K = K_init.copy()
+    else:
+        K = mixture.wilson_K(T, p)
+
+    for it in range(maxiter):
+        beta, _ = rachford_rice(z, K)
+        if not (0 < beta < 1):
+            # Outside the two-phase region given current K. Fall back to
+            # SS+Broyden which has more robust handling of these cases.
+            return flash_pt(p, T, z, mixture, K_init=K, check_stability=False,
+                            tol=tol, maxiter=maxiter)
+        D = 1.0 + beta * (K - 1.0)
+        x = z / D; x = x / x.sum()
+        y = K * (z / D); y = y / y.sum()
+
+        try:
+            rho_L = mixture.density_from_pressure(p, T, x, phase_hint='liquid')
+            rho_V = mixture.density_from_pressure(p, T, y, phase_hint='vapor')
+        except RuntimeError:
+            return flash_pt(p, T, z, mixture, K_init=K, check_stability=False,
+                            tol=tol, maxiter=maxiter)
+
+        lnphi_L = mixture.ln_phi(rho_L, T, x)
+        lnphi_V = mixture.ln_phi(rho_V, T, y)
+        F = np.log(K) - (lnphi_L - lnphi_V)
+        if np.max(np.abs(F)) < tol:
+            v_avg = beta / rho_V + (1.0 - beta) / rho_L
+            cal_L = mixture.caloric(rho_L, T, x, p=p)
+            cal_V = mixture.caloric(rho_V, T, y, p=p)
+            return CubicFlashResult(
+                phase="two_phase", T=T, p=p, beta=beta,
+                x=x, y=y, z=z, rho=1.0/v_avg,
+                rho_L=rho_L, rho_V=rho_V,
+                h=beta*cal_V["h"] + (1-beta)*cal_L["h"],
+                s=beta*cal_V["s"] + (1-beta)*cal_L["s"],
+                iterations=it+1, K=K,
+            )
+
+        # Build analytic Jacobian.
+        # Step 1: dbeta/dK from implicit RR differentiation
+        denom = np.sum(z * (K - 1.0)**2 / D**2)
+        dbeta_dK = (z / D**2) / denom
+        # Step 2: dx/dK, dy/dK from chain rule through RR
+        # dx[m, j] = -z_m * (dbeta_dK[j]*(K_m - 1) + beta*delta_mj) / D_m^2
+        dx_dK = -z[:, None] * (np.outer(K - 1.0, dbeta_dK) + beta * np.eye(N)) / (D[:, None] ** 2)
+        # dy[m, j] = delta_mj * x_m + K_m * dx[m, j]
+        dy_dK = np.eye(N) * x[:, None] + K[:, None] * dx_dK
+        # Step 3: analytic dlnphi/dx for both phases
+        try:
+            dlnphi_L_dx = mixture.dlnphi_dxk_at_p(p, T, x, phase_hint='liquid')
+            dlnphi_V_dy = mixture.dlnphi_dxk_at_p(p, T, y, phase_hint='vapor')
+        except (RuntimeError, NotImplementedError):
+            return flash_pt(p, T, z, mixture, K_init=K, check_stability=False,
+                            tol=tol, maxiter=maxiter)
+        # Step 4: assemble. Newton step is on ln K, so dF/d(ln K_j) = K_j * dF/dK_j.
+        # dF_i/dK_j = delta_ij/K_j + (something / K_j... no, let me redo)
+        # F_i = ln K_i - (lnphi_L_i - lnphi_V_i)
+        # d/d(ln K_j) [ln K_i] = delta_ij
+        # d/d(ln K_j) [lnphi_X_i] = K_j * d(lnphi_X_i)/dK_j
+        #                        = K_j * sum_m dlnphi_X_i/dx_m * dx_m/dK_j   (X=L)
+        # Same for V with y instead of x.
+        J = np.eye(N) + (dlnphi_V_dy @ dy_dK - dlnphi_L_dx @ dx_dK) * K
+
+        try:
+            delta = np.linalg.solve(J, -F)
+        except np.linalg.LinAlgError:
+            return flash_pt(p, T, z, mixture, K_init=K, check_stability=False,
+                            tol=tol, maxiter=maxiter)
+        # Step damping
+        max_step = np.max(np.abs(delta))
+        if max_step > 1.0:
+            delta = delta / max_step
+        K = np.exp(np.log(K) + delta)
+
+    # Did not converge in maxiter; fall back to SS+Broyden from current K
+    return flash_pt(p, T, z, mixture, K_init=K, check_stability=False,
+                    tol=tol, maxiter=80)
 
 
 # -------------------------------------------------------------------------
@@ -1009,6 +1340,445 @@ def dew_point_p(T, z, mixture, p_init=None, tol=1e-8, maxiter=60):
     raise RuntimeError(f"dew_point_p did not converge: T={T}, p={p}, S-1={f_resid:.2e}")
 
 
+# ---------------------------------------------------------------------------
+# Newton-Raphson bubble/dew solvers (v0.9.15)
+# ---------------------------------------------------------------------------
+#
+# Quadratic-convergence bubble/dew solvers using the analytic Jacobian built
+# from the cubic analytic composition derivatives (v0.9.8) and T/p
+# derivatives of ln phi (v0.9.10) implemented on CubicMixture.
+#
+# Formulation mirrors the Helmholtz Newton solvers in
+# stateprop.mixture.flash (v0.9.14): unknowns X = (ln K_1..N, ln p) [or ln T],
+# residuals (N+1 total):
+#
+#   R_i        = ln K_i - (ln phi_i^L(z) - ln phi_i^V(y)), i=1..N
+#   R_{N+1}    = Sum(K z) - 1  (bubble) or Sum(z/K) - 1 (dew)
+#
+# The Jacobian uses dlnphi_dxk_at_p, dlnphi_dp_at_T, dlnphi_dT_at_p from
+# CubicMixture. Because these three methods raise NotImplementedError for
+# Peneloux volume-shifted mixtures (no derivatives implemented through the
+# c_mix shift chain rule), each Newton solver falls back to SS on that
+# error type, and also on singular Jacobian or mid-iteration density
+# failure. This makes Newton at worst as robust as SS.
+
+
+def _newton_cubic_bubble_residual_jac_p(lnK, lnp, T, z, mixture):
+    """Residual and analytic Jacobian for cubic bubble_point_p Newton.
+    Unknowns: X = (ln K_1..N, ln p).  Fixed: T, z.
+    """
+    z = np.asarray(z, dtype=np.float64)
+    N = len(z)
+    K = np.exp(lnK)
+    p = float(np.exp(lnp))
+
+    Kz = K * z
+    S = float(Kz.sum())
+    y = Kz / S
+
+    try:
+        rho_L = mixture.density_from_pressure(p, T, z, phase_hint='liquid')
+    except RuntimeError:
+        rho_L = mixture.density_from_pressure(p, T, z, phase_hint='vapor')
+    try:
+        rho_V = mixture.density_from_pressure(p, T, y, phase_hint='vapor')
+    except RuntimeError:
+        rho_V = mixture.density_from_pressure(p, T, y, phase_hint='liquid')
+    lnphi_L = mixture.ln_phi(rho_L, T, z)
+    lnphi_V = mixture.ln_phi(rho_V, T, y)
+
+    R = np.empty(N + 1)
+    R[:N] = lnK - (lnphi_L - lnphi_V)
+    R[N] = S - 1.0
+
+    dy_dlnK = np.diag(y) - np.outer(y, y)
+    dlnphi_V_dy = mixture.dlnphi_dxk_at_p(p, T, y, phase_hint='vapor')
+    dlnphi_L_dp = mixture.dlnphi_dp_at_T(p, T, z, phase_hint='liquid')
+    dlnphi_V_dp = mixture.dlnphi_dp_at_T(p, T, y, phase_hint='vapor')
+
+    J = np.zeros((N + 1, N + 1))
+    J[:N, :N] = np.eye(N) + dlnphi_V_dy @ dy_dlnK
+    J[:N, N] = -(dlnphi_L_dp - dlnphi_V_dp) * p
+    J[N, :N] = K * z
+    J[N, N] = 0.0
+    return R, J, K, y
+
+
+def _newton_cubic_bubble_residual_jac_T(lnK, lnT, p, z, mixture):
+    """Residual and analytic Jacobian for cubic bubble_point_T Newton.
+    Unknowns: X = (ln K_1..N, ln T).  Fixed: p, z.
+    """
+    z = np.asarray(z, dtype=np.float64)
+    N = len(z)
+    K = np.exp(lnK)
+    T = float(np.exp(lnT))
+
+    Kz = K * z
+    S = float(Kz.sum())
+    y = Kz / S
+
+    try:
+        rho_L = mixture.density_from_pressure(p, T, z, phase_hint='liquid')
+    except RuntimeError:
+        rho_L = mixture.density_from_pressure(p, T, z, phase_hint='vapor')
+    try:
+        rho_V = mixture.density_from_pressure(p, T, y, phase_hint='vapor')
+    except RuntimeError:
+        rho_V = mixture.density_from_pressure(p, T, y, phase_hint='liquid')
+    lnphi_L = mixture.ln_phi(rho_L, T, z)
+    lnphi_V = mixture.ln_phi(rho_V, T, y)
+
+    R = np.empty(N + 1)
+    R[:N] = lnK - (lnphi_L - lnphi_V)
+    R[N] = S - 1.0
+
+    dy_dlnK = np.diag(y) - np.outer(y, y)
+    dlnphi_V_dy = mixture.dlnphi_dxk_at_p(p, T, y, phase_hint='vapor')
+    dlnphi_L_dT = mixture.dlnphi_dT_at_p(p, T, z, phase_hint='liquid')
+    dlnphi_V_dT = mixture.dlnphi_dT_at_p(p, T, y, phase_hint='vapor')
+
+    J = np.zeros((N + 1, N + 1))
+    J[:N, :N] = np.eye(N) + dlnphi_V_dy @ dy_dlnK
+    J[:N, N] = -(dlnphi_L_dT - dlnphi_V_dT) * T
+    J[N, :N] = K * z
+    J[N, N] = 0.0
+    return R, J, K, y
+
+
+def _newton_cubic_dew_residual_jac_p(lnK, lnp, T, z, mixture):
+    """Residual and analytic Jacobian for cubic dew_point_p Newton.
+    Unknowns: X = (ln K_1..N, ln p).  Fixed: T, z (vapor).
+    """
+    z = np.asarray(z, dtype=np.float64)
+    N = len(z)
+    K = np.exp(lnK)
+    p = float(np.exp(lnp))
+
+    zK = z / K
+    W = float(zK.sum())
+    x = zK / W
+
+    try:
+        rho_V = mixture.density_from_pressure(p, T, z, phase_hint='vapor')
+    except RuntimeError:
+        rho_V = mixture.density_from_pressure(p, T, z, phase_hint='liquid')
+    try:
+        rho_L = mixture.density_from_pressure(p, T, x, phase_hint='liquid')
+    except RuntimeError:
+        rho_L = mixture.density_from_pressure(p, T, x, phase_hint='vapor')
+    lnphi_V = mixture.ln_phi(rho_V, T, z)
+    lnphi_L = mixture.ln_phi(rho_L, T, x)
+
+    R = np.empty(N + 1)
+    R[:N] = lnK - (lnphi_L - lnphi_V)
+    R[N] = W - 1.0
+
+    dx_dlnK = np.outer(x, x) - np.diag(x)
+    dlnphi_L_dx = mixture.dlnphi_dxk_at_p(p, T, x, phase_hint='liquid')
+    dlnphi_L_dp = mixture.dlnphi_dp_at_T(p, T, x, phase_hint='liquid')
+    dlnphi_V_dp = mixture.dlnphi_dp_at_T(p, T, z, phase_hint='vapor')
+
+    J = np.zeros((N + 1, N + 1))
+    J[:N, :N] = np.eye(N) - dlnphi_L_dx @ dx_dlnK
+    J[:N, N] = -(dlnphi_L_dp - dlnphi_V_dp) * p
+    J[N, :N] = -z / K
+    J[N, N] = 0.0
+    return R, J, K, x
+
+
+def _newton_cubic_dew_residual_jac_T(lnK, lnT, p, z, mixture):
+    """Residual and analytic Jacobian for cubic dew_point_T Newton."""
+    z = np.asarray(z, dtype=np.float64)
+    N = len(z)
+    K = np.exp(lnK)
+    T = float(np.exp(lnT))
+
+    zK = z / K
+    W = float(zK.sum())
+    x = zK / W
+
+    try:
+        rho_V = mixture.density_from_pressure(p, T, z, phase_hint='vapor')
+    except RuntimeError:
+        rho_V = mixture.density_from_pressure(p, T, z, phase_hint='liquid')
+    try:
+        rho_L = mixture.density_from_pressure(p, T, x, phase_hint='liquid')
+    except RuntimeError:
+        rho_L = mixture.density_from_pressure(p, T, x, phase_hint='vapor')
+    lnphi_V = mixture.ln_phi(rho_V, T, z)
+    lnphi_L = mixture.ln_phi(rho_L, T, x)
+
+    R = np.empty(N + 1)
+    R[:N] = lnK - (lnphi_L - lnphi_V)
+    R[N] = W - 1.0
+
+    dx_dlnK = np.outer(x, x) - np.diag(x)
+    dlnphi_L_dx = mixture.dlnphi_dxk_at_p(p, T, x, phase_hint='liquid')
+    dlnphi_L_dT = mixture.dlnphi_dT_at_p(p, T, x, phase_hint='liquid')
+    dlnphi_V_dT = mixture.dlnphi_dT_at_p(p, T, z, phase_hint='vapor')
+
+    J = np.zeros((N + 1, N + 1))
+    J[:N, :N] = np.eye(N) - dlnphi_L_dx @ dx_dlnK
+    J[:N, N] = -(dlnphi_L_dT - dlnphi_V_dT) * T
+    J[N, :N] = -z / K
+    J[N, N] = 0.0
+    return R, J, K, x
+
+
+def newton_bubble_point_p(T, z, mixture, p_init=None, tol=1e-10, maxiter=25,
+                          step_cap=0.5):
+    """Newton-Raphson bubble-point pressure for a cubic mixture at fixed T.
+
+    Uses v0.9.8 (composition) + v0.9.10 (p) analytic Jacobian blocks from
+    CubicMixture for quadratic convergence. Falls back to SS on singular
+    Jacobian, density-solver failure, or NotImplementedError (e.g. on
+    Peneloux volume-shifted mixtures where the analytic derivative chain
+    is not yet wired through the volume shift).
+
+    Parameters
+    ----------
+    T : float
+    z : array (N,)
+    mixture : CubicMixture
+    p_init : float or None     initial p; Wilson estimate if None
+    tol : float                max |R_i| at convergence
+    maxiter : int
+    step_cap : float           max |dX_k| per iteration in log-space
+
+    Returns
+    -------
+    CubicFlashResult with phase='bubble', beta=0.
+    """
+    z = np.asarray(z, dtype=np.float64); z = z / z.sum()
+    N = len(z)
+
+    if p_init is None:
+        A = np.array([c.p_c * np.exp(5.373 * (1 + c.acentric_factor) * (1 - c.T_c / T))
+                      for c in mixture.components])
+        p_init = max(float(np.dot(z, A)), 1e3)
+
+    p = float(p_init)
+    K_init = mixture.wilson_K(T, p)
+    lnK = np.log(K_init)
+    lnp = np.log(p)
+
+    for it in range(maxiter):
+        try:
+            R, J, K, y = _newton_cubic_bubble_residual_jac_p(lnK, lnp, T, z, mixture)
+        except (RuntimeError, NotImplementedError):
+            return bubble_point_p(T, z, mixture, p_init=float(np.exp(lnp)),
+                                  tol=tol, maxiter=maxiter + 20)
+
+        res = float(np.max(np.abs(R)))
+        if res < tol:
+            p_final = float(np.exp(lnp))
+            try:
+                rho_L = mixture.density_from_pressure(p_final, T, z, phase_hint='liquid')
+            except RuntimeError:
+                rho_L = mixture.density_from_pressure(p_final, T, z, phase_hint='vapor')
+            try:
+                rho_V = mixture.density_from_pressure(p_final, T, y, phase_hint='vapor')
+            except RuntimeError:
+                rho_V = mixture.density_from_pressure(p_final, T, y, phase_hint='liquid')
+            cal = mixture.caloric(rho_L, T, z, p=p_final)
+            return CubicFlashResult(
+                phase='bubble', T=T, p=p_final, beta=0.0,
+                x=z.copy(), y=y, z=z, rho=rho_L,
+                rho_L=rho_L, rho_V=rho_V,
+                h=cal["h"], s=cal["s"], iterations=it + 1, K=K,
+            )
+
+        try:
+            dX = -np.linalg.solve(J, R)
+        except np.linalg.LinAlgError:
+            return bubble_point_p(T, z, mixture, p_init=float(np.exp(lnp)),
+                                  tol=tol, maxiter=maxiter + 20)
+
+        dX_max = float(np.max(np.abs(dX)))
+        if dX_max > step_cap:
+            dX = dX * (step_cap / dX_max)
+
+        lnK = lnK + dX[:N]
+        lnp = lnp + dX[N]
+
+    return bubble_point_p(T, z, mixture, p_init=float(np.exp(lnp)),
+                         tol=tol, maxiter=maxiter + 30)
+
+
+def newton_bubble_point_T(p, z, mixture, T_init=None, tol=1e-10, maxiter=25,
+                          step_cap=0.5):
+    """Newton-Raphson bubble-point temperature for a cubic mixture at fixed p."""
+    z = np.asarray(z, dtype=np.float64); z = z / z.sum()
+    N = len(z)
+
+    if T_init is None:
+        T_init = float(np.dot(z, [c.T_c for c in mixture.components]))
+
+    T = float(T_init)
+    K_init = mixture.wilson_K(T, p)
+    lnK = np.log(K_init)
+    lnT = np.log(T)
+
+    for it in range(maxiter):
+        try:
+            R, J, K, y = _newton_cubic_bubble_residual_jac_T(lnK, lnT, p, z, mixture)
+        except (RuntimeError, NotImplementedError):
+            # Pass original T_init, not the (possibly diverged) Newton iterate
+            return bubble_point_T(p, z, mixture, T_init=T_init,
+                                  tol=tol, maxiter=maxiter + 20)
+
+        res = float(np.max(np.abs(R)))
+        if res < tol:
+            T_final = float(np.exp(lnT))
+            try:
+                rho_L = mixture.density_from_pressure(p, T_final, z, phase_hint='liquid')
+            except RuntimeError:
+                rho_L = mixture.density_from_pressure(p, T_final, z, phase_hint='vapor')
+            try:
+                rho_V = mixture.density_from_pressure(p, T_final, y, phase_hint='vapor')
+            except RuntimeError:
+                rho_V = mixture.density_from_pressure(p, T_final, y, phase_hint='liquid')
+            cal = mixture.caloric(rho_L, T_final, z, p=p)
+            return CubicFlashResult(
+                phase='bubble', T=T_final, p=p, beta=0.0,
+                x=z.copy(), y=y, z=z, rho=rho_L,
+                rho_L=rho_L, rho_V=rho_V,
+                h=cal["h"], s=cal["s"], iterations=it + 1, K=K,
+            )
+
+        try:
+            dX = -np.linalg.solve(J, R)
+        except np.linalg.LinAlgError:
+            return bubble_point_T(p, z, mixture, T_init=T_init,
+                                  tol=tol, maxiter=maxiter + 20)
+
+        dX_max = float(np.max(np.abs(dX)))
+        if dX_max > step_cap:
+            dX = dX * (step_cap / dX_max)
+
+        lnK = lnK + dX[:N]
+        lnT = lnT + dX[N]
+
+    return bubble_point_T(p, z, mixture, T_init=T_init,
+                         tol=tol, maxiter=maxiter + 30)
+
+
+def newton_dew_point_p(T, z, mixture, p_init=None, tol=1e-10, maxiter=25,
+                       step_cap=0.5):
+    """Newton-Raphson dew-point pressure for a cubic mixture at fixed T."""
+    z = np.asarray(z, dtype=np.float64); z = z / z.sum()
+    N = len(z)
+
+    if p_init is None:
+        A = np.array([c.p_c * np.exp(5.373 * (1 + c.acentric_factor) * (1 - c.T_c / T))
+                      for c in mixture.components])
+        p_init = max(1.0 / float(np.dot(z, 1.0 / A)), 1e3)
+
+    p = float(p_init)
+    K_init = mixture.wilson_K(T, p)
+    lnK = np.log(K_init)
+    lnp = np.log(p)
+
+    for it in range(maxiter):
+        try:
+            R, J, K, x = _newton_cubic_dew_residual_jac_p(lnK, lnp, T, z, mixture)
+        except (RuntimeError, NotImplementedError):
+            return dew_point_p(T, z, mixture, p_init=float(np.exp(lnp)),
+                               tol=tol, maxiter=maxiter + 20)
+
+        res = float(np.max(np.abs(R)))
+        if res < tol:
+            p_final = float(np.exp(lnp))
+            try:
+                rho_L = mixture.density_from_pressure(p_final, T, x, phase_hint='liquid')
+            except RuntimeError:
+                rho_L = mixture.density_from_pressure(p_final, T, x, phase_hint='vapor')
+            try:
+                rho_V = mixture.density_from_pressure(p_final, T, z, phase_hint='vapor')
+            except RuntimeError:
+                rho_V = mixture.density_from_pressure(p_final, T, z, phase_hint='liquid')
+            cal = mixture.caloric(rho_V, T, z, p=p_final)
+            return CubicFlashResult(
+                phase='dew', T=T, p=p_final, beta=1.0,
+                x=x, y=z.copy(), z=z, rho=rho_V,
+                rho_L=rho_L, rho_V=rho_V,
+                h=cal["h"], s=cal["s"], iterations=it + 1, K=K,
+            )
+
+        try:
+            dX = -np.linalg.solve(J, R)
+        except np.linalg.LinAlgError:
+            return dew_point_p(T, z, mixture, p_init=float(np.exp(lnp)),
+                               tol=tol, maxiter=maxiter + 20)
+
+        dX_max = float(np.max(np.abs(dX)))
+        if dX_max > step_cap:
+            dX = dX * (step_cap / dX_max)
+
+        lnK = lnK + dX[:N]
+        lnp = lnp + dX[N]
+
+    return dew_point_p(T, z, mixture, p_init=float(np.exp(lnp)),
+                      tol=tol, maxiter=maxiter + 30)
+
+
+def newton_dew_point_T(p, z, mixture, T_init=None, tol=1e-10, maxiter=25,
+                       step_cap=0.5):
+    """Newton-Raphson dew-point temperature for a cubic mixture at fixed p."""
+    z = np.asarray(z, dtype=np.float64); z = z / z.sum()
+    N = len(z)
+
+    if T_init is None:
+        T_init = float(np.dot(z, [c.T_c for c in mixture.components]))
+
+    T = float(T_init)
+    K_init = mixture.wilson_K(T, p)
+    lnK = np.log(K_init)
+    lnT = np.log(T)
+
+    for it in range(maxiter):
+        try:
+            R, J, K, x = _newton_cubic_dew_residual_jac_T(lnK, lnT, p, z, mixture)
+        except (RuntimeError, NotImplementedError):
+            return dew_point_T(p, z, mixture, T_init=float(np.exp(lnT)),
+                               tol=tol, maxiter=maxiter + 20)
+
+        res = float(np.max(np.abs(R)))
+        if res < tol:
+            T_final = float(np.exp(lnT))
+            try:
+                rho_L = mixture.density_from_pressure(p, T_final, x, phase_hint='liquid')
+            except RuntimeError:
+                rho_L = mixture.density_from_pressure(p, T_final, x, phase_hint='vapor')
+            try:
+                rho_V = mixture.density_from_pressure(p, T_final, z, phase_hint='vapor')
+            except RuntimeError:
+                rho_V = mixture.density_from_pressure(p, T_final, z, phase_hint='liquid')
+            cal = mixture.caloric(rho_V, T_final, z, p=p)
+            return CubicFlashResult(
+                phase='dew', T=T_final, p=p, beta=1.0,
+                x=x, y=z.copy(), z=z, rho=rho_V,
+                rho_L=rho_L, rho_V=rho_V,
+                h=cal["h"], s=cal["s"], iterations=it + 1, K=K,
+            )
+
+        try:
+            dX = -np.linalg.solve(J, R)
+        except np.linalg.LinAlgError:
+            return dew_point_T(p, z, mixture, T_init=float(np.exp(lnT)),
+                               tol=tol, maxiter=maxiter + 20)
+
+        dX_max = float(np.max(np.abs(dX)))
+        if dX_max > step_cap:
+            dX = dX * (step_cap / dX_max)
+
+        lnK = lnK + dX[:N]
+        lnT = lnT + dX[N]
+
+    return dew_point_T(p, z, mixture, T_init=float(np.exp(lnT)),
+                      tol=tol, maxiter=maxiter + 30)
+
+
 # -------------------------------------------------------------------------
 # State-function flashes for cubic mixtures
 #
@@ -1405,4 +2175,334 @@ def flash_uv(u_target, v_target, z, mixture,
     raise RuntimeError(
         f"cubic flash_uv did not converge (u={u_target}, v={v_target}, "
         f"last T={T}, last |du|={best_diff:.3e})"
+    )
+
+
+# -----------------------------------------------------------------------
+# PV flash and Pα / Tα flash modes (v0.9.56)
+# -----------------------------------------------------------------------
+
+
+def flash_pv(p, v_target, z, mixture, T_init=None, tol=1e-8, maxiter=60):
+    """PV flash for a cubic mixture.
+
+    Given (p, v_target, z), find the temperature T such that the bulk
+    mixture molar volume (1/rho) at fixed p equals v_target. Symmetric
+    counterpart of `flash_tv` (which solves for p at fixed T).
+
+    Useful for:
+    - Throttling-valve and aftercooler analysis where pressure and
+      total volume of the inventory are specified.
+    - Tank/cylinder calculations: known pressure, known geometric
+      volume, known total moles -> molar volume, find equilibrium T.
+
+    Algorithm: secant in ln(T) with bracket. Exterior branch (vapor at
+    high T, liquid at low T) gives v_total monotonically decreasing in
+    T at fixed p; the two-phase region produces a discontinuity in
+    dv/dT but the value remains continuous. Bracket-projecting secant
+    handles both regimes robustly.
+    """
+    z = np.asarray(z, dtype=np.float64); z = z / z.sum()
+
+    R = 8.314472
+
+    if T_init is None:
+        # Heuristic: ideal-gas T at this v gives the vapor branch start;
+        # for low v, start near critical T weighted by composition.
+        T_ig = p * v_target / R
+        if T_ig > 50.0 and T_ig < 2000.0:
+            T_init = T_ig
+        else:
+            T_init = float(np.dot(z, mixture.T_c)) * 0.9
+    T = max(float(T_init), 50.0)
+
+    def v_residual(T_val):
+        r = flash_pt(p, T_val, z, mixture, check_stability=False, tol=1e-10)
+        return 1.0 / r.rho - v_target, r
+
+    res1, r1 = v_residual(T)
+    if abs(res1) < tol * abs(v_target):
+        return r1
+    # Initial second point
+    T2 = T * 1.5 if res1 < 0 else T * 0.7
+    T2 = max(T2, 50.0)
+    res2, r2 = v_residual(T2)
+    if abs(res2) < tol * abs(v_target):
+        return r2
+
+    best_res, best_r = (res1, r1) if abs(res1) <= abs(res2) else (res2, r2)
+
+    # Bracket search by expanding T2
+    expand = 0
+    while res1 * res2 > 0 and expand < 20:
+        if abs(res2) < abs(res1):
+            T, res1, r1 = T2, res2, r2
+            T2 = T2 * 1.5 if res2 < 0 else T2 * 0.7
+        else:
+            T2 = T2 * 1.5 if res2 < 0 else T2 * 0.7
+        T2 = max(T2, 50.0)
+        res2, r2 = v_residual(T2)
+        if abs(res2) < abs(best_res):
+            best_res, best_r = res2, r2
+        if abs(res2) < tol * abs(v_target):
+            return r2
+        expand += 1
+
+    prev_best = abs(best_res)
+    stagnation = 0
+    for it in range(maxiter):
+        lnT, lnT2 = np.log(T), np.log(T2)
+        if abs(res2 - res1) < 1e-30:
+            lnT_new = 0.5 * (lnT + lnT2)
+        else:
+            lnT_new = lnT2 - res2 * (lnT2 - lnT) / (res2 - res1)
+        if res1 * res2 < 0:
+            lo, hi = (lnT, lnT2) if lnT < lnT2 else (lnT2, lnT)
+            if not (lo <= lnT_new <= hi):
+                lnT_new = 0.5 * (lo + hi)
+        T_new = float(np.exp(lnT_new))
+        T_new = max(T_new, 50.0)
+        res_new, r_new = v_residual(T_new)
+        if abs(res_new) < abs(best_res):
+            best_res, best_r = res_new, r_new
+        if abs(res_new) < tol * abs(v_target):
+            return r_new
+
+        if abs(best_res) >= prev_best * 0.9:
+            stagnation += 1
+            if stagnation >= 3 and abs(best_res) < 1e-5 * abs(v_target):
+                return best_r
+        else:
+            stagnation = 0
+        prev_best = abs(best_res)
+
+        if res1 * res2 < 0:
+            if res_new * res1 < 0:
+                T2, res2, r2 = T_new, res_new, r_new
+            else:
+                T, res1, r1 = T_new, res_new, r_new
+        else:
+            T, res1, r1 = T2, res2, r2
+            T2, res2, r2 = T_new, res_new, r_new
+
+    if abs(best_res) < 1e-4 * abs(v_target):
+        return best_r
+    raise RuntimeError(
+        f"cubic flash_pv did not converge (p={p}, v={v_target}, "
+        f"last T={T2:.3e}, last v={1.0/r2.rho:.3e}, "
+        f"best |res|={abs(best_res):.3e})"
+    )
+
+
+def flash_p_alpha(p, alpha, z, mixture, T_init=None, tol=1e-7, maxiter=60):
+    """Specified-vapor-fraction flash at fixed pressure.
+
+    Given (p, alpha, z) where alpha is the desired vapor mole fraction
+    (0 = bubble point, 1 = dew point, anything in between is a partial
+    vaporization at fixed p), find the temperature T at which the
+    isothermal flash yields beta = alpha.
+
+    Special cases:
+      alpha = 0  -> equivalent to bubble_point_T (calls newton_bubble_point_T)
+      alpha = 1  -> equivalent to dew_point_T   (calls newton_dew_point_T)
+      0 < alpha < 1 -> internal secant on T using flash_pt residuals
+
+    Use cases:
+      - Phase envelope construction at constant pressure (sweep alpha).
+      - Sizing flash drums for partial vaporization streams.
+      - Constructing T-x-y diagrams: alpha = 0 gives bubble curve in
+        terms of x, alpha = 1 gives dew curve in terms of y.
+
+    The algorithm brackets the solution between the bubble T (where
+    beta = 0) and the dew T (where beta = 1), then secants on T using
+    the residual r.beta - alpha. The bracket is a guaranteed solution
+    interval since beta increases monotonically with T at fixed p
+    inside the two-phase dome.
+    """
+    z = np.asarray(z, dtype=np.float64); z = z / z.sum()
+
+    if not (0.0 <= alpha <= 1.0):
+        raise ValueError(f"alpha must be in [0, 1], got {alpha}")
+
+    # Special endpoints reduce to bubble/dew solvers
+    if alpha == 0.0:
+        return newton_bubble_point_T(p, z, mixture, T_init=T_init,
+                                        tol=tol, maxiter=maxiter)
+    if alpha == 1.0:
+        return newton_dew_point_T(p, z, mixture, T_init=T_init,
+                                     tol=tol, maxiter=maxiter)
+
+    # Find bubble T and dew T to establish bracket
+    try:
+        bub = newton_bubble_point_T(p, z, mixture, T_init=T_init, tol=1e-8)
+        T_bub = bub.T
+    except Exception as e:
+        raise RuntimeError(f"flash_p_alpha: bubble T failed at p={p}: {e}")
+    try:
+        dew = newton_dew_point_T(p, z, mixture, T_init=T_bub * 1.05, tol=1e-8)
+        T_dew = dew.T
+    except Exception as e:
+        raise RuntimeError(f"flash_p_alpha: dew T failed at p={p}: {e}")
+
+    if T_dew <= T_bub:
+        raise RuntimeError(
+            f"flash_p_alpha: degenerate envelope (T_bub={T_bub}, T_dew={T_dew})"
+        )
+
+    def beta_residual(T_val):
+        r = flash_pt(p, T_val, z, mixture, check_stability=False, tol=1e-10)
+        beta = r.beta if r.beta is not None else (1.0 if r.phase == 'vapor' else 0.0)
+        return beta - alpha, r
+
+    # Initial linear interpolation in T between T_bub and T_dew, weighted
+    # by alpha (good first guess for many systems).
+    T_lo, T_hi = T_bub, T_dew
+    T = T_lo + alpha * (T_hi - T_lo)
+    res, r = beta_residual(T)
+    if abs(res) < tol:
+        return r
+
+    # Maintain bracket [T_lo, T_hi] with res < 0 at T_lo, res > 0 at T_hi
+    T_a, res_a = T_lo, -alpha           # at bubble, beta = 0, res = -alpha
+    T_b, res_b = T_hi, 1.0 - alpha      # at dew,    beta = 1, res = 1-alpha
+    # Insert current point into the bracket
+    if res < 0:
+        T_a, res_a = T, res
+    else:
+        T_b, res_b = T, res
+
+    last_T = T
+    for it in range(maxiter):
+        # Secant in T using the bracket endpoints
+        if abs(res_b - res_a) < 1e-30:
+            T_new = 0.5 * (T_a + T_b)
+        else:
+            T_new = T_b - res_b * (T_b - T_a) / (res_b - res_a)
+        # Project into bracket
+        if not (min(T_a, T_b) < T_new < max(T_a, T_b)):
+            T_new = 0.5 * (T_a + T_b)
+
+        res_new, r_new = beta_residual(T_new)
+        if abs(res_new) < tol:
+            return r_new
+
+        if res_new < 0:
+            T_a, res_a = T_new, res_new
+        else:
+            T_b, res_b = T_new, res_new
+
+        # Stagnation guard
+        if abs(T_new - last_T) < 1e-10 * T_new:
+            return r_new
+        last_T = T_new
+
+    raise RuntimeError(
+        f"cubic flash_p_alpha did not converge (p={p}, alpha={alpha}, "
+        f"T={T_new:.3e}, |res|={abs(res_new):.3e}); bracket=[{T_a:.3f}, "
+        f"{T_b:.3f}]"
+    )
+
+
+def flash_t_alpha(T, alpha, z, mixture, p_init=None, tol=1e-7, maxiter=60):
+    """Specified-vapor-fraction flash at fixed temperature.
+
+    Given (T, alpha, z) where alpha is the desired vapor mole fraction,
+    find the pressure p at which the isothermal flash yields beta =
+    alpha.
+
+    Special cases:
+      alpha = 0  -> bubble pressure (calls newton_bubble_point_p)
+      alpha = 1  -> dew pressure   (calls newton_dew_point_p)
+      0 < alpha < 1 -> internal secant on ln(p)
+
+    Use cases:
+      - Phase envelope at constant temperature.
+      - Constructing P-x-y diagrams.
+      - Determining condensation pressure for partial-condensation
+        process design.
+
+    Algorithm: bracket [p_dew, p_bubble] (note: bubble p > dew p at
+    fixed T, opposite ordering from temperature flash), secant on
+    ln(p) using residual beta(p) - alpha. Inside the dome,
+    beta DECREASES as p increases (compression liquefies vapor).
+    """
+    z = np.asarray(z, dtype=np.float64); z = z / z.sum()
+
+    if not (0.0 <= alpha <= 1.0):
+        raise ValueError(f"alpha must be in [0, 1], got {alpha}")
+
+    if alpha == 0.0:
+        return newton_bubble_point_p(T, z, mixture, p_init=p_init,
+                                        tol=tol, maxiter=maxiter)
+    if alpha == 1.0:
+        return newton_dew_point_p(T, z, mixture, p_init=p_init,
+                                     tol=tol, maxiter=maxiter)
+
+    try:
+        bub = newton_bubble_point_p(T, z, mixture, p_init=p_init, tol=1e-8)
+        p_bub = bub.p
+    except Exception as e:
+        raise RuntimeError(f"flash_t_alpha: bubble p failed at T={T}: {e}")
+    try:
+        dew = newton_dew_point_p(T, z, mixture, p_init=p_bub * 0.5, tol=1e-8)
+        p_dew = dew.p
+    except Exception as e:
+        raise RuntimeError(f"flash_t_alpha: dew p failed at T={T}: {e}")
+
+    if p_dew >= p_bub:
+        raise RuntimeError(
+            f"flash_t_alpha: degenerate envelope (p_bub={p_bub}, p_dew={p_dew})"
+        )
+
+    def beta_residual(p_val):
+        r = flash_pt(p_val, T, z, mixture, check_stability=False, tol=1e-10)
+        beta = r.beta if r.beta is not None else (1.0 if r.phase == 'vapor' else 0.0)
+        return beta - alpha, r
+
+    # Bracket: at p = p_bub, beta=0 (res=-alpha); at p = p_dew, beta=1
+    # (res=1-alpha). beta is monotonically decreasing in p; bracket is
+    # [p_dew, p_bub] with res(p_bub) < 0, res(p_dew) > 0.
+    p_a, res_a = p_dew, 1.0 - alpha     # higher residual at lower p
+    p_b, res_b = p_bub, -alpha
+    # Linear-in-alpha guess in ln(p)
+    lnp_dew, lnp_bub = np.log(p_dew), np.log(p_bub)
+    p = float(np.exp(lnp_dew + alpha * (lnp_bub - lnp_dew)))
+    res, r = beta_residual(p)
+    if abs(res) < tol:
+        return r
+
+    # Insert current point into bracket
+    if res > 0:
+        p_a, res_a = p, res
+    else:
+        p_b, res_b = p, res
+
+    last_p = p
+    for it in range(maxiter):
+        lnpa, lnpb = np.log(p_a), np.log(p_b)
+        if abs(res_b - res_a) < 1e-30:
+            lnp_new = 0.5 * (lnpa + lnpb)
+        else:
+            lnp_new = lnpb - res_b * (lnpb - lnpa) / (res_b - res_a)
+        if not (min(lnpa, lnpb) < lnp_new < max(lnpa, lnpb)):
+            lnp_new = 0.5 * (lnpa + lnpb)
+        p_new = float(np.exp(lnp_new))
+
+        res_new, r_new = beta_residual(p_new)
+        if abs(res_new) < tol:
+            return r_new
+
+        if res_new > 0:
+            p_a, res_a = p_new, res_new
+        else:
+            p_b, res_b = p_new, res_new
+
+        if abs(p_new - last_p) < 1e-10 * p_new:
+            return r_new
+        last_p = p_new
+
+    raise RuntimeError(
+        f"cubic flash_t_alpha did not converge (T={T}, alpha={alpha}, "
+        f"p={p_new:.3e}, |res|={abs(res_new):.3e}); bracket=[{p_a:.3e}, "
+        f"{p_b:.3e}]"
     )

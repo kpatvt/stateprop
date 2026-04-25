@@ -64,6 +64,13 @@ from .flash import (
     flash_pt, flash_tbeta, flash_pbeta,
     flash_ph, flash_ps, flash_th, flash_ts,
     bubble_point_p, bubble_point_T, dew_point_p, dew_point_T,
+    newton_bubble_point_p, newton_bubble_point_T,
+    newton_dew_point_p, newton_dew_point_T,
+)
+from .critical import critical_point, critical_point_multistart
+from .envelope import trace_envelope, envelope_point
+from .three_phase_flash import (
+    ThreePhaseFlashResult, flash_pt_three_phase,
 )
 
 __all__ = [
@@ -77,4 +84,12 @@ __all__ = [
     "flash_pt", "flash_tbeta", "flash_pbeta",
     "flash_ph", "flash_ps", "flash_th", "flash_ts",
     "bubble_point_p", "bubble_point_T", "dew_point_p", "dew_point_T",
+    "newton_bubble_point_p", "newton_bubble_point_T",
+    "newton_dew_point_p", "newton_dew_point_T",
+    "critical_point",
+    "critical_point_multistart",
+    "trace_envelope",
+    "envelope_point",
+    "ThreePhaseFlashResult",
+    "flash_pt_three_phase",
 ]

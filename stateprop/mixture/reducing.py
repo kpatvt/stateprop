@@ -32,6 +32,86 @@ import numpy as np
 from dataclasses import dataclass, field
 from typing import Dict, Tuple, List
 
+try:
+    from numba import njit
+except ImportError:
+    # Numba is optional; fall back to a pass-through decorator. The hot
+    # _reducing_derivatives_kernel below will still work but at Python speed.
+    def njit(*args, **kwargs):
+        if len(args) == 1 and callable(args[0]):
+            return args[0]
+        def deco(fn): return fn
+        return deco
+
+
+@njit(cache=True)
+def _reducing_derivatives_kernel(x, T_c, vc, sqrtTcTc, vr_factor,
+                                 beta_T_mat, gamma_T_mat,
+                                 beta_v_mat, gamma_v_mat):
+    """Numba-JIT inner of KunzWagnerReducing.derivatives.
+
+    Mathematically identical to the original Python double loop in
+    derivatives() (which still exists below as a reference / fallback);
+    factored out so that the inner loops compile to optimized machine code
+    via Numba. Accepts pre-computed parameter matrices (built once in the
+    KunzWagnerReducing constructor) so all dict lookups are eliminated.
+
+    Returns (Tr, inv_rho_r, dTr_dxi, d_invrho_dxi).
+    """
+    N = x.shape[0]
+    Tr = 0.0
+    inv_rho_r = 0.0
+    dTr = np.zeros(N)
+    d_invrho = np.zeros(N)
+
+    for i in range(N):
+        xi = x[i]
+        Tci = T_c[i]
+        vci = vc[i]
+        Tr += xi * xi * Tci
+        inv_rho_r += xi * xi * vci
+        dTr[i] += 2.0 * xi * Tci
+        d_invrho[i] += 2.0 * xi * vci
+
+        for j in range(N):
+            if j == i:
+                continue
+            xj = x[j]
+
+            # Temperature contribution from ordered pair (i, j)
+            betaT = beta_T_mat[i, j]
+            gammaT = gamma_T_mat[i, j]
+            sqrtTcij = sqrtTcTc[i, j]
+            denom = betaT * betaT * xi + xj
+            if denom > 0:
+                f = xi * xj * (xi + xj) / denom
+                Tr += betaT * gammaT * sqrtTcij * f
+                # df/dxi
+                dfdxi = (xj * (xi + xj) + xi * xj) * denom - xi * xj * (xi + xj) * betaT * betaT
+                dfdxi /= denom * denom
+                dTr[i] += betaT * gammaT * sqrtTcij * dfdxi
+                # df/dxj
+                dfdxj = (xi * (xi + xj) + xi * xj) * denom - xi * xj * (xi + xj) * 1.0
+                dfdxj /= denom * denom
+                dTr[j] += betaT * gammaT * sqrtTcij * dfdxj
+
+            # Volume contribution from ordered pair (i, j)
+            betav = beta_v_mat[i, j]
+            gammav = gamma_v_mat[i, j]
+            vfac = vr_factor[i, j]
+            denomv = betav * betav * xi + xj
+            if denomv > 0:
+                fv = xi * xj * (xi + xj) / denomv
+                inv_rho_r += betav * gammav * vfac * fv
+                dfvdxi = (xj * (xi + xj) + xi * xj) * denomv - xi * xj * (xi + xj) * betav * betav
+                dfvdxi /= denomv * denomv
+                d_invrho[i] += betav * gammav * vfac * dfvdxi
+                dfvdxj = (xi * (xi + xj) + xi * xj) * denomv - xi * xj * (xi + xj) * 1.0
+                dfvdxj /= denomv * denomv
+                d_invrho[j] += betav * gammav * vfac * dfvdxj
+
+    return Tr, inv_rho_r, dTr, d_invrho
+
 
 def _cube_root(x):
     return x ** (1.0 / 3.0)
@@ -91,6 +171,26 @@ class KunzWagnerReducing:
             for j in range(self.N):
                 s = cr[i] + cr[j]
                 self._vr_factor[i, j] = 0.125 * s * s * s       # (1/8) * (vc_i^(1/3) + vc_j^(1/3))^3
+
+        # Pre-compute (N, N) parameter matrices so the hot Numba kernel
+        # in `derivatives()` can do array indexing instead of going through
+        # the Python dict-lookup `beta_gamma_T(i, j)` call. The diagonals
+        # are 1.0 (i==j returns 1.0 by the helper convention); off-diagonals
+        # are looked up with the asymmetric Kunz-Wagner rule (beta_ji = 1/beta_ij).
+        self._beta_T_mat = np.ones((self.N, self.N))
+        self._gamma_T_mat = np.ones((self.N, self.N))
+        self._beta_v_mat = np.ones((self.N, self.N))
+        self._gamma_v_mat = np.ones((self.N, self.N))
+        for i in range(self.N):
+            for j in range(self.N):
+                if i == j:
+                    continue
+                bT, gT = self.beta_gamma_T(i, j)
+                bv, gv = self.beta_gamma_v(i, j)
+                self._beta_T_mat[i, j] = bT
+                self._gamma_T_mat[i, j] = gT
+                self._beta_v_mat[i, j] = bv
+                self._gamma_v_mat[i, j] = gv
 
     # ---- parameter lookup (honoring i<j storage) ----
     def beta_gamma_T(self, i, j):
@@ -194,6 +294,108 @@ class KunzWagnerReducing:
         dTr_dxi : ndarray, shape (N,)
         d_inv_rhor_dxi : ndarray, shape (N,)   -- derivative of 1/rho_r
         """
+        x = np.asarray(x, dtype=np.float64)
+        # Hot path: dispatch to the JIT-compiled kernel using pre-computed
+        # parameter matrices. The Python double-loop reference implementation
+        # below this line is dead code under normal use, kept as a clear
+        # algorithmic reference (the kernel is mathematically identical but
+        # harder to read).
+        Tr, inv_rho_r, dTr, d_invrho = _reducing_derivatives_kernel(
+            x, self.T_c, self._vc, self._sqrtTcTc, self._vr_factor,
+            self._beta_T_mat, self._gamma_T_mat,
+            self._beta_v_mat, self._gamma_v_mat,
+        )
+        rho_r = 1.0 / inv_rho_r if inv_rho_r > 0 else 0.0
+        return Tr, rho_r, dTr, d_invrho
+
+    def hessian(self, x):
+        """Compute (d^2 T_r / dx_k dx_l, d^2 (1/rho_r) / dx_k dx_l) at x.
+
+        Both are N x N symmetric matrices. The same KW pair-sum structure
+        is used as in derivatives(); the algebra of differentiating the
+        per-pair contribution u(a, b; beta) = a*b*(a+b)/(beta^2*a + b)
+        twice gives:
+
+            N(a, b)   = a*b*(a+b)
+            D(a, b; beta) = beta^2 * a + b
+            N_a = b*(2a + b),   N_b = a*(a + 2b),
+            N_aa = 2b,  N_bb = 2a,  N_ab = 2*(a + b) = 2*s
+            d2u/da^2  = (N_aa * D^2 - 2*beta^2*N_a*D + 2*beta^4*N) / D^3
+            d2u/db^2  = (N_bb * D^2 - 2*N_b*D + 2*N) / D^3
+            d2u/da db = (2*s * D^2 - (beta^2*N_b + N_a) * D + 2*beta^2*N) / D^3
+
+        Each ordered pair (i, j) with i != j contributes c_ij * d2u where
+        c_ij = beta_ij * gamma_ij * sqrt(Tc_i * Tc_j) (or for volume,
+        c_ij = beta_v_ij * gamma_v_ij * vr_factor[i, j]).
+
+        Hessian entries:
+          (k, l) with k != l : contributions from ordered pairs (k, l) and
+                               (l, k), via cross-derivative d2u/da db
+          (k, k) diagonal    : 2*Tc_k (or 2*vc_k) from x_k^2 term, plus
+                               for each j != k contributions from pair
+                               (k, j) [d2u/da^2 with a=x_k] and (j, k)
+                               [d2u/db^2 with b=x_k]
+        """
+        x = np.asarray(x, dtype=np.float64)
+        N = self.N
+        H_T = np.zeros((N, N))
+        H_invrho = np.zeros((N, N))
+        # Diagonal contributions from x_i^2 * Tc_i (or x_i^2 * vc_i)
+        for k in range(N):
+            H_T[k, k] += 2.0 * self.T_c[k]
+            H_invrho[k, k] += 2.0 * self._vc[k]
+
+        for i in range(N):
+            for j in range(N):
+                if i == j:
+                    continue
+                a = x[i]; b = x[j]
+                s = a + b
+                Nij = a * b * s
+                N_a = b * (2.0 * a + b)
+                N_b = a * (a + 2.0 * b)
+                N_aa = 2.0 * b
+                N_bb = 2.0 * a
+
+                # Temperature pair contribution
+                bT = self._beta_T_mat[i, j]; gT = self._gamma_T_mat[i, j]
+                D = bT * bT * a + b
+                if D > 0:
+                    cij_T = bT * gT * self._sqrtTcTc[i, j]
+                    D2 = D * D; D3 = D2 * D
+                    bT2 = bT * bT; bT4 = bT2 * bT2
+                    d2u_aa = (N_aa * D2 - 2.0 * bT2 * N_a * D + 2.0 * bT4 * Nij) / D3
+                    d2u_bb = (N_bb * D2 - 2.0 * N_b * D + 2.0 * Nij) / D3
+                    d2u_ab = (2.0 * s * D2 - (bT2 * N_b + N_a) * D + 2.0 * bT2 * Nij) / D3
+                    # Pair (i, j) contributes c_ij * d2u with a=x_i, b=x_j:
+                    #   d^2/dx_i^2  -> H[i,i] += c * d2u_aa
+                    #   d^2/dx_j^2  -> H[j,j] += c * d2u_bb
+                    #   d^2/dx_i dx_j -> H[i,j] += c * d2u_ab; H[j,i] += c * d2u_ab
+                    H_T[i, i] += cij_T * d2u_aa
+                    H_T[j, j] += cij_T * d2u_bb
+                    H_T[i, j] += cij_T * d2u_ab
+                    H_T[j, i] += cij_T * d2u_ab
+
+                # Volume pair contribution (same structure with vol params)
+                bv = self._beta_v_mat[i, j]; gv = self._gamma_v_mat[i, j]
+                Dv = bv * bv * a + b
+                if Dv > 0:
+                    cij_v = bv * gv * self._vr_factor[i, j]
+                    Dv2 = Dv * Dv; Dv3 = Dv2 * Dv
+                    bv2 = bv * bv; bv4 = bv2 * bv2
+                    d2v_aa = (N_aa * Dv2 - 2.0 * bv2 * N_a * Dv + 2.0 * bv4 * Nij) / Dv3
+                    d2v_bb = (N_bb * Dv2 - 2.0 * N_b * Dv + 2.0 * Nij) / Dv3
+                    d2v_ab = (2.0 * s * Dv2 - (bv2 * N_b + N_a) * Dv + 2.0 * bv2 * Nij) / Dv3
+                    H_invrho[i, i] += cij_v * d2v_aa
+                    H_invrho[j, j] += cij_v * d2v_bb
+                    H_invrho[i, j] += cij_v * d2v_ab
+                    H_invrho[j, i] += cij_v * d2v_ab
+
+        return H_T, H_invrho
+
+    def _derivatives_python_reference(self, x):
+        """Reference Python implementation of derivatives(). Kept for
+        debugging and as a check on the JIT kernel; not used in hot paths."""
         x = np.asarray(x, dtype=np.float64)
         Tr = 0.0
         inv_rho_r = 0.0

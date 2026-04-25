@@ -226,3 +226,64 @@ def evaluate_total_departure(x, delta, tau, departures):
         dD_dx[j] += x[i] * F_ij * A
 
     return Delta, Delta_d, Delta_t, Delta_dd, Delta_tt, Delta_dt, dD_dx
+
+
+def evaluate_total_departure_extended(x, delta, tau, departures):
+    """Like evaluate_total_departure but also returns composition derivatives
+    of (Delta_d, Delta_t) and the Hessian of Delta w.r.t. x at fixed (delta, tau).
+
+    These extra pieces are needed for the analytic d(ln phi)/dx Jacobian
+    used by Newton-Raphson flash and second-order methods.
+
+    Returns
+    -------
+    All 7 outputs from evaluate_total_departure, plus:
+    dDelta_d_dxi : ndarray (N,)   d(Delta_d)/dx_i   at fixed (delta, tau)
+    dDelta_t_dxi : ndarray (N,)   d(Delta_t)/dx_i   at fixed (delta, tau)
+    d2Delta_dxidxj : ndarray (N, N)   Hessian of Delta w.r.t. x at fixed (delta, tau)
+
+    The Hessian is sparse: only off-diagonal pair (i, j) entries are nonzero
+    when (i, j) is a stored departure pair, with value F_ij * A_ij.
+    """
+    N = len(x)
+    Delta = 0.0
+    Delta_d = 0.0
+    Delta_t = 0.0
+    Delta_dd = 0.0
+    Delta_tt = 0.0
+    Delta_dt = 0.0
+    dD_dx = np.zeros(N)
+    dDd_dx = np.zeros(N)        # d(Delta_d)/dx_k
+    dDt_dx = np.zeros(N)        # d(Delta_t)/dx_k
+    d2D = np.zeros((N, N))       # d^2 Delta / dx_k dx_l
+
+    for (i, j), (F_ij, alpha_ij) in departures.items():
+        A, A_d, A_t, A_dd, A_tt, A_dt = alpha_ij.evaluate(delta, tau)
+        xi_xj_F = x[i] * x[j] * F_ij
+
+        Delta    += xi_xj_F * A
+        Delta_d  += xi_xj_F * A_d
+        Delta_t  += xi_xj_F * A_t
+        Delta_dd += xi_xj_F * A_dd
+        Delta_tt += xi_xj_F * A_tt
+        Delta_dt += xi_xj_F * A_dt
+
+        # First-order x derivatives at fixed (delta, tau)
+        dD_dx[i] += x[j] * F_ij * A
+        dD_dx[j] += x[i] * F_ij * A
+        # First-order x derivatives of Delta_d (the delta-derivative piece)
+        # By the same logic as dDelta_dxi but with A -> A_d:
+        dDd_dx[i] += x[j] * F_ij * A_d
+        dDd_dx[j] += x[i] * F_ij * A_d
+        # Same for Delta_t:
+        dDt_dx[i] += x[j] * F_ij * A_t
+        dDt_dx[j] += x[i] * F_ij * A_t
+        # Hessian of Delta. For a single bilinear term x_i * x_j * F_ij * A_ij,
+        # the second-derivative matrix has only off-diagonal (i, j) and (j, i)
+        # entries equal to F_ij * A_ij. (Diagonal entries are zero because
+        # the term is linear in each individual x_k.)
+        d2D[i, j] += F_ij * A
+        d2D[j, i] += F_ij * A
+
+    return (Delta, Delta_d, Delta_t, Delta_dd, Delta_tt, Delta_dt,
+            dD_dx, dDd_dx, dDt_dx, d2D)

@@ -508,6 +508,481 @@ class CubicMixture:
 
         return lnphi
 
+    # ------------------------------------------------------------------
+    # Analytic composition derivatives of ln phi
+    # ------------------------------------------------------------------
+    #
+    # The derivation below produces the N x N Jacobian
+    #
+    #     J[i, k] = d(ln phi_i) / d x_k    at fixed (T, p)
+    #
+    # which is the central piece needed for second-order methods on the
+    # cubic-EOS flash: full Newton-Raphson on ln K (vs the rank-1 Broyden
+    # secant approximation used in v0.9.7), Hessian-based stability tests
+    # for global instability detection, arclength continuation along phase
+    # envelopes, and direct critical-point solvers.
+    #
+    # Strategy: derive at fixed (T, rho) first (where everything is
+    # algebraic in x), then convert to fixed (T, p) via the chain rule
+    #
+    #     dlnphi_i/dx_k|_{T,p} = dlnphi_i/dx_k|_{T,rho}
+    #                          + dlnphi_i/drho|_{T,x} * drho/dx_k|_{T,p}
+    #
+    # where drho/dx_k|_{T,p} comes from implicit differentiation of the
+    # state equation p(rho, T, x) = p_target:
+    #
+    #     drho/dx_k|_{T,p} = -dp/dx_k|_{T,rho} / dp/drho|_{T,x}
+    #
+    # The four scalar/vector/matrix building blocks are:
+    #   (1) dlnphi_dx_at_rho   :  N x N
+    #   (2) dlnphi_drho        :  N
+    #   (3) dp_dx_at_rho       :  N
+    #   (4) dp_drho_at_x       :  scalar  (already exists as dp_drho_T)
+    #
+    # All four are FD-verified to ~1e-7 absolute by the test suite. The
+    # combined J is FD-verified to ~1e-6 (slightly larger due to compounded
+    # rounding in the chain-rule combination).
+
+    def _dp_dx_at_rho(self, rho, T, x):
+        """Composition derivative of pressure at fixed (T, rho).
+
+        From p = RT*rho/(1-B) - a_m * rho^2 / [(1+eps*B)(1+sig*B)]:
+            dp/dx_k = RT * rho * (b_k * rho) / (1-B)^2
+                    - SI_k * rho^2 / [(1+eps*B)(1+sig*B)]
+                    + a_m * rho^2 * b_k * rho * (eps + sig + 2*eps*sig*B)
+                                              / [(1+eps*B)(1+sig*B)]^2
+
+        For vdW degenerate case (eps == sig == 0), the second term reduces
+        to -SI_k * rho^2 and the third term vanishes.
+
+        Returns ndarray of shape (N,).
+        """
+        a_mix, b_mix, _, SI, _, _ = self.a_b_mix(T, x)
+        eps_ = self.epsilon
+        sig = self.sigma
+        RT = self.R * T
+        b_vec = self.b_vec
+        B = b_mix * rho
+        one_minus_B = 1.0 - B
+        # Term 1: derivative of RT*rho/(1-B)
+        # = RT*rho * d(1/(1-B))/dx_k = RT*rho * (b_k*rho)/(1-B)^2
+        t1 = RT * rho * (b_vec * rho) / (one_minus_B * one_minus_B)
+        if abs(sig - eps_) > 1e-14:
+            E = 1.0 + eps_ * B
+            S = 1.0 + sig * B
+            ES = E * S
+            # Term 2: -SI_k * rho^2 / ES
+            t2 = -SI * rho * rho / ES
+            # Term 3: -a_m * rho^2 * d(1/ES)/dx_k
+            #       = +a_m * rho^2 * (eps*S + sig*E) * b_k * rho / ES^2
+            # Note: d(ES)/dx_k = eps*b_k*rho * S + sig*b_k*rho * E
+            #                  = b_k*rho * (eps*S + sig*E)
+            t3 = a_mix * rho * rho * b_vec * rho * (eps_ * S + sig * E) / (ES * ES)
+            return t1 + t2 + t3
+        # vdW degenerate: p = RT*rho/(1-B) - a_m * rho^2
+        return t1 - SI * rho * rho
+
+    def _dlnphi_drho_at_x(self, rho, T, x):
+        """Density derivative of ln phi at fixed (T, x), N-vector.
+
+        Differentiate the ln_phi formula w.r.t. rho. Each term is treated
+        independently. With B = b_m*rho, dB/drho = b_m. Returns d/drho of
+        each ln phi_i.
+        """
+        a_mix, b_mix, _, SI, _, _ = self.a_b_mix(T, x)
+        eps_ = self.epsilon
+        sig = self.sigma
+        RT = self.R * T
+        b_vec = self.b_vec
+        B = b_mix * rho
+        one_minus_B = 1.0 - B
+        # Z = p / (rho * RT). d(ln Z)/drho = d ln p / drho - 1/rho
+        # d ln p / drho = (1/p) * dp/drho
+        # We need dp/drho at fixed (T, x), already implemented as dp_drho_T.
+        # Use it directly.
+        dp_drho = self._dp_drho_T_value(rho, T, x)
+        # And p itself
+        v = 1.0 / rho
+        if abs(sig - eps_) > 1e-14:
+            p = RT / (v - b_mix) - a_mix / ((v + eps_ * b_mix) * (v + sig * b_mix))
+        else:
+            p = RT / (v - b_mix) - a_mix / (v * v)
+        # Term 1: -ln(1-B). d/drho = b_m/(1-B)  (component-independent scalar)
+        d1 = b_mix / one_minus_B
+        # Term 2: rho*b_i/(1-B). d/drho = b_i/(1-B) + rho*b_i*b_m/(1-B)^2
+        d2 = b_vec / one_minus_B + rho * b_vec * b_mix / (one_minus_B * one_minus_B)
+        # Term 5: -ln Z = -ln p + ln rho + ln(RT)
+        # d/drho = -dp/drho / p + 1/rho
+        d5 = -dp_drho / p + 1.0 / rho
+        if abs(sig - eps_) > 1e-14:
+            E = 1.0 + eps_ * B
+            S = 1.0 + sig * B
+            L = np.log(S / E)
+            # dL/drho = d/drho [ln(1+sig*B) - ln(1+eps*B)]
+            #         = sig*b_m/S - eps*b_m/E
+            #         = b_m * D_func   where D_func = sig/S - eps/E
+            D_func = sig / S - eps_ / E
+            dL_drho = b_mix * D_func
+            U = SI / b_mix - a_mix * b_vec / (b_mix * b_mix)  # bracket from term 3
+            # Term 3: -L/[RT(sig-eps)] * U  ... U doesn't depend on rho, only L does
+            d3 = -dL_drho / (RT * (sig - eps_)) * U
+            # Term 4: -(a_m * rho * b_i)/(RT * b_m * (sig-eps)) * D_func
+            # Both rho and D_func depend on rho. Use product rule:
+            #   prefactor = -(a_m * b_vec)/(RT * b_m * (sig-eps))
+            #   d/drho [prefactor * rho * D_func] = prefactor * (D_func + rho * dD_func/drho)
+            # dD_func/drho = -sig^2*b_m/S^2 + eps^2*b_m/E^2 = -b_m * Dprime
+            # where Dprime = sig^2/S^2 - eps^2/E^2
+            Dprime = sig * sig / (S * S) - eps_ * eps_ / (E * E)
+            dD_drho = -b_mix * Dprime
+            prefac = -(a_mix * b_vec) / (RT * b_mix * (sig - eps_))
+            d4 = prefac * (D_func + rho * dD_drho)
+            return d1 + d2 + d3 + d4 + d5
+        # vdW degenerate: ln_phi reduces to
+        #   lnphi_i = -ln(1-B) + rho*b_i/(1-B) - SI_i*rho/RT - ln Z
+        # d4 absent in this branch.
+        d3_vdw = -SI / RT
+        return d1 + d2 + d3_vdw + d5
+
+    def _dp_drho_T_value(self, rho, T, x):
+        """Compute dp/drho at fixed (T, x). Helper used by _dlnphi_drho_at_x.
+
+        Same math as the existing dp_drho method but returns just the scalar
+        without re-fetching mixture params.
+        """
+        a_mix, b_mix, _, _, _, _ = self.a_b_mix(T, x)
+        eps_ = self.epsilon
+        sig = self.sigma
+        RT = self.R * T
+        v = 1.0 / rho
+        # p = RT/(v-b) - a/((v+eps*b)(v+sig*b))
+        # dp/drho at fixed (T, x) = -v^2 * dp/dv|_{T,x}
+        # dp/dv = -RT/(v-b)^2 + a*[(v+eps*b)+(v+sig*b)]/[(v+eps*b)(v+sig*b)]^2
+        # so dp/drho = v^2 * RT/(v-b)^2 - v^2 * a*[(v+eps*b)+(v+sig*b)]/[...]^2
+        if abs(sig - eps_) > 1e-14:
+            ve = v + eps_ * b_mix
+            vs = v + sig * b_mix
+            dp_drho = (v * v) * RT / ((v - b_mix) * (v - b_mix)) \
+                    - (v * v) * a_mix * (ve + vs) / ((ve * vs) * (ve * vs))
+        else:
+            dp_drho = (v * v) * RT / ((v - b_mix) * (v - b_mix)) \
+                    - (v * v) * a_mix * 2.0 / (v * v * v * v)
+        return dp_drho
+
+    def _dlnphi_dx_at_rho(self, rho, T, x):
+        """N x N Jacobian d(ln phi_i) / d x_k at fixed (T, rho).
+
+        From the ln_phi formula. Each of the four (or three, for vdW)
+        terms in the formula is differentiated component-wise. The result
+        is NOT symmetric in i and k because ln_phi_i has explicit i-dependence
+        through b_i and SI_i.
+
+        Returns ndarray of shape (N, N). J[i, k] = dlnphi_i/dx_k.
+        """
+        a_mix, b_mix, sqrt_a, SI, a_vec, _ = self.a_b_mix(T, x)
+        eps_ = self.epsilon
+        sig = self.sigma
+        RT = self.R * T
+        N = self.N
+        b_vec = self.b_vec
+        # A_ij = sqrt_a * sqrt_a * (1-k_ij), used for dSI_i/dx_k = 2*A_ik
+        A_ij = np.outer(sqrt_a, sqrt_a) * self.one_minus_kij
+        B = b_mix * rho
+        one_minus_B = 1.0 - B
+
+        # Build J term by term as N x N matrices.
+        # All "k" indices are the differentiation variable; "i" indices
+        # are the component whose ln phi we're differentiating.
+        # b_vec[k] gives column-broadcast b_k; b_vec[i] gives row-broadcast b_i.
+
+        # Term 1: -ln(1-B). dT1/dx_k = b_k * rho / (1-B). Same for all i.
+        # As an N x N matrix: J1[i, k] = b_k * rho / (1-B).
+        T1_row = b_vec * rho / one_minus_B          # shape (N,)
+        J1 = np.broadcast_to(T1_row, (N, N))
+
+        # Term 2: rho * b_i / (1-B). dT2/dx_k = rho * b_i * b_k * rho / (1-B)^2
+        # J2[i, k] = b_i * b_k * rho^2 / (1-B)^2
+        J2 = (rho * rho / (one_minus_B * one_minus_B)) * np.outer(b_vec, b_vec)
+
+        if abs(sig - eps_) > 1e-14:
+            E = 1.0 + eps_ * B
+            S = 1.0 + sig * B
+            L = np.log(S / E)
+            D_func = sig / S - eps_ / E
+            Dprime = sig * sig / (S * S) - eps_ * eps_ / (E * E)
+            # dL/dx_k = D_func * b_k * rho
+            dL_dx = D_func * b_vec * rho   # shape (N,)
+            # dD_func/dx_k = -Dprime * b_k * rho
+            dD_dx = -Dprime * b_vec * rho
+
+            # U_i = SI_i/b_m - a_m b_i / b_m^2
+            U = SI / b_mix - a_mix * b_vec / (b_mix * b_mix)   # shape (N,)
+            # dU_i/dx_k:
+            # d(SI_i/b_m)/dx_k = (2*A_ik * b_m - SI_i * b_k) / b_m^2
+            # d(a_m b_i/b_m^2)/dx_k = b_i * d(a_m/b_m^2)/dx_k
+            #   d(a_m/b_m^2)/dx_k = (SI_k * b_m^2 - a_m * 2*b_m*b_k) / b_m^4
+            #                     = SI_k/b_m^2 - 2*a_m*b_k/b_m^3
+            # So d(a_m b_i/b_m^2)/dx_k = b_i*(SI_k/b_m^2 - 2*a_m*b_k/b_m^3)
+            dU_dx = (2.0 * A_ij * b_mix - np.outer(SI, b_vec)) / (b_mix * b_mix) \
+                  - np.outer(b_vec, SI / (b_mix * b_mix) - 2.0 * a_mix * b_vec / (b_mix ** 3))
+            # J3[i, k] = -1/(RT*(sig-eps)) * (dL_dx[k] * U[i] + L * dU_dx[i, k])
+            J3 = -1.0 / (RT * (sig - eps_)) * (np.outer(U, dL_dx) + L * dU_dx)
+
+            # Term 4: -(a_m * rho * b_i) / (RT * b_m * (sig-eps)) * D_func
+            # Let V_i = a_m * rho * b_i / (RT * b_m * (sig-eps))
+            # Then T4_i = -V_i * D_func, so dT4_i/dx_k = -dV_i/dx_k * D_func - V_i * dD_func/dx_k
+            # V_i = (a_m / b_m) * (rho * b_i / (RT * (sig-eps)))
+            # dV_i/dx_k = d(a_m/b_m)/dx_k * (rho * b_i / (RT * (sig-eps)))
+            # d(a_m/b_m)/dx_k = (SI_k*b_m - a_m*b_k)/b_m^2
+            d_amb_dx = (SI * b_mix - a_mix * b_vec) / (b_mix * b_mix)   # shape (N,) — this is over k
+            V_i = (a_mix / b_mix) * (rho * b_vec / (RT * (sig - eps_)))    # shape (N,)
+            # J4[i, k] = -(rho*b_i)/(RT*(sig-eps)) * (d_amb_dx[k] * D_func + (a_m/b_m) * dD_dx[k])
+            prefac_i = -(rho * b_vec) / (RT * (sig - eps_))                # shape (N,)
+            inner_k = d_amb_dx * D_func + (a_mix / b_mix) * dD_dx          # shape (N,)
+            J4 = np.outer(prefac_i, inner_k)
+        else:
+            # vdW degenerate: term 3 collapses, term 4 absent.
+            # ln_phi has the term -SI_i * rho / RT instead.
+            # d(-SI_i * rho / RT)/dx_k = -2*A_ik * rho / RT
+            J3 = -2.0 * A_ij * rho / RT
+            J4 = np.zeros((N, N))
+
+        # Term 5: -ln Z. Z = p/(rho*RT). At fixed (T, rho), dZ/dx_k = (1/(rho*RT)) * dp/dx_k.
+        # d(ln Z)/dx_k = (1/Z) * (1/(rho*RT)) * dp/dx_k = dp/dx_k / p
+        v = 1.0 / rho
+        if abs(sig - eps_) > 1e-14:
+            p = RT / (v - b_mix) - a_mix / ((v + eps_ * b_mix) * (v + sig * b_mix))
+        else:
+            p = RT / (v - b_mix) - a_mix / (v * v)
+        dp_dx = self._dp_dx_at_rho(rho, T, x)            # shape (N,)
+        T5_row = -dp_dx / p                              # same for all i
+        J5 = np.broadcast_to(T5_row, (N, N))
+
+        return J1 + J2 + J3 + J4 + J5
+
+    def dlnphi_dxk_at_p(self, p, T, x, phase_hint='vapor'):
+        """N x N Jacobian d(ln phi_i) / d x_k at fixed (T, p).
+
+        This is the analytic derivative used to construct the Newton
+        Jacobian for cubic-EOS flash. Combines:
+          (1) d(ln phi_i)/dx_k at fixed (T, rho), with
+          (2) d(ln phi_i)/drho at fixed (T, x), and
+          (3) drho/dx_k at fixed (T, p) from implicit differentiation
+              of the state equation p(rho, T, x) = p_target.
+
+            J[i, k] = J_x[i, k]_{T,rho} + J_rho[i] * (drho/dx_k)_{T,p}
+            (drho/dx_k)_{T,p} = -dp/dx_k|_{T,rho} / dp/drho|_{T,x}
+
+        FD-verified to ~1e-6 across multiple compositions and phases.
+
+        Parameters
+        ----------
+        p : pressure [Pa]
+        T : temperature [K]
+        x : composition (length N)
+        phase_hint : 'vapor' | 'liquid' selecting which cubic root to use
+            for rho. The Jacobian is phase-specific because the cubic
+            generally has multiple physical roots.
+
+        Returns
+        -------
+        J : ndarray, shape (N, N), J[i, k] = d(ln phi_i)/d x_k.
+        """
+        x = np.asarray(x, dtype=np.float64)
+        # Volume-translation handling (v0.9.16):
+        # The Peneloux shift adds `c_i * p/RT` to ln phi_i, which has no x
+        # dependence at fixed (T, p) since c_i is a pure-component constant.
+        # So dlnphi_real/dx_k = dlnphi_cubic/dx_k at fixed (T, p), and the
+        # cubic derivative chain rule runs unchanged -- EXCEPT the helper
+        # functions (_dlnphi_dx_at_rho, etc.) internally treat their rho
+        # argument as rho_cubic. For Peneloux, density_from_pressure returns
+        # rho_real = 1/v_real = 1/(v_cubic - c_mix), so we must convert to
+        # rho_cubic = 1/(1/rho_real + c_mix) before calling the helpers.
+        if self._has_volume_shift:
+            rho_real = self.density_from_pressure(p, T, x, phase_hint=phase_hint)
+            c_m = self.c_mix(x)
+            rho = 1.0 / (1.0 / rho_real + c_m)         # rho_cubic
+        else:
+            rho = self.density_from_pressure(p, T, x, phase_hint=phase_hint)
+        J_x_at_rho = self._dlnphi_dx_at_rho(rho, T, x)            # (N, N)
+        dlnphi_drho = self._dlnphi_drho_at_x(rho, T, x)           # (N,)
+        dp_dx = self._dp_dx_at_rho(rho, T, x)                     # (N,)
+        dp_drho = self._dp_drho_T_value(rho, T, x)                # scalar
+        drho_dx = -dp_dx / dp_drho                                 # (N,)
+        # Chain rule: J[i, k] = J_x[i, k] + dlnphi_drho[i] * drho_dx[k]
+        # Note: this is dlnphi_i/dx_k |_{T, p}, where rho (=rho_cubic) is
+        # the implicit function of x at fixed (T, p) via the cubic's p
+        # equation. No Peneloux correction term needed -- the c_i*p/RT
+        # shift in ln phi is x-independent.
+        return J_x_at_rho + np.outer(dlnphi_drho, drho_dx)
+
+    # ------------------------------------------------------------------
+    # Temperature and pressure derivatives of ln phi (v0.9.10)
+    # ------------------------------------------------------------------
+    #
+    # The four building blocks below complete the primitive set of
+    # analytic derivatives of ln phi needed for second-order methods on
+    # the bubble-point, dew-point, and phase-envelope solvers:
+    #
+    #   d(ln phi)/dp at fixed (T, x)  -- N-vector
+    #   d(ln phi)/dT at fixed (p, x)  -- N-vector
+    #
+    # Both are FD-verified to ~1e-8 across multiple phases/states by the
+    # regression tests. Combined with dlnphi_dxk_at_p (v0.9.8), they give
+    # the full set of first-order sensitivities of ln phi to its
+    # independent variables, which is all that's needed for any Newton
+    # solver in the (x, T, p) space.
+
+    def _dp_dT_at_rho(self, rho, T, x):
+        """Temperature derivative of pressure at fixed (rho, x).
+
+        p = RT/(v - b_m) - a_m/((v+eps b_m)(v+sig b_m))
+        Only a_m depends on T (through each pure component's a_i(T)).
+        b_m does not depend on T, so nor does B = b_m * rho.
+
+            dp/dT|_{rho, x} = R/(v - b_m) - (da_m/dT) / ((v+eps b_m)(v+sig b_m))
+                            = R * rho/(1-B) - (da_m/dT) * rho^2 / ((1+eps B)(1+sig B))
+
+        For vdW degenerate (eps == sig == 0):
+            dp/dT|_{rho, x} = R * rho/(1-B) - (da_m/dT) * rho^2
+        """
+        a_mix, b_mix, sqrt_a, _, a_vec, da_dT_vec = self.a_b_mix(T, x)
+        # da_m/dT = x^T M x  where M[i,j] = d A_ij/dT with A_ij = (1-k_ij)sqrt(a_i a_j)
+        #   M[i, j] = (1 - k_ij)/(2 sqrt(a_i a_j)) * (r_i a_j + r_j a_i),  r_i = da_i/dT
+        # Vectorized as in _dp_dT (if it existed); do it inline here.
+        r = da_dT_vec / sqrt_a
+        M = 0.5 * (np.outer(sqrt_a, r) + np.outer(r, sqrt_a)) * self.one_minus_kij
+        da_mix_dT = float(x.dot(M.dot(x)))
+
+        eps_ = self.epsilon
+        sig = self.sigma
+        B = b_mix * rho
+        one_minus_B = 1.0 - B
+        # dp/dT at fixed (rho, x)
+        if abs(sig - eps_) > 1e-14:
+            E = 1.0 + eps_ * B
+            S = 1.0 + sig * B
+            return self.R * rho / one_minus_B - da_mix_dT * rho * rho / (E * S)
+        return self.R * rho / one_minus_B - da_mix_dT * rho * rho
+
+    def _dlnphi_dT_at_rho(self, rho, T, x):
+        """Temperature derivative of ln phi at fixed (rho, x), N-vector.
+
+        Differentiate the ln_phi formula w.r.t. T at fixed (rho, x).
+        Only a_m, SI_i carry T-dependence (through each pure a_i(T));
+        L, B, bracket_dL are all pure functions of (rho, x).
+
+        Writing U_i = SI_i/b_m - a_m b_i/b_m^2, term-by-term:
+
+            term1 = -ln(1-B) + rho b_i/(1-B)                 no T-dep
+            term2 = -L U_i/(RT (sig-eps))
+                d/dT = -L/(R(sig-eps)) * (dU/dT / T - U/T^2)
+                      = -L/(R T (sig-eps)) * (dU/dT - U/T)
+            term3 = -(a_m rho b_i)/(RT b_m (sig-eps)) * bracket_dL
+                d/dT = -(rho b_i bracket_dL)/(R b_m (sig-eps)) * (da_m/dT / T - a_m/T^2)
+                     = -(rho b_i bracket_dL)/(R T b_m (sig-eps)) * (da_m/dT - a_m/T)
+            term4 = -ln Z = -ln(p/(rho R T)) = -ln p + ln(rho R T)
+                d/dT = -(1/p) dp/dT + 1/T
+
+        For vdW degenerate: term2 and term3 collapse into -SI_i rho/(RT):
+            term23 = -SI_i rho/(RT)
+            d/dT = -rho/R * (dSI/dT/T - SI/T^2) = -rho/(RT) * (dSI/dT - SI/T)
+        """
+        a_mix, b_mix, sqrt_a, SI, a_vec, da_dT_vec = self.a_b_mix(T, x)
+        # M[i, j] = d A_ij/dT, where A_ij = (1 - k_ij) sqrt(a_i a_j)
+        r = da_dT_vec / sqrt_a
+        M = 0.5 * (np.outer(sqrt_a, r) + np.outer(r, sqrt_a)) * self.one_minus_kij
+        # dSI_i/dT = 2 sum_j x_j M[i, j]
+        dSI_dT = 2.0 * M.dot(x)                    # (N,)
+        da_mix_dT = float(x.dot(M.dot(x)))
+
+        eps_ = self.epsilon
+        sig = self.sigma
+        RT = self.R * T
+        b_vec = self.b_vec
+        B = b_mix * rho
+        one_minus_B = 1.0 - B
+        v = 1.0 / rho
+        if abs(sig - eps_) > 1e-14:
+            E = 1.0 + eps_ * B
+            S = 1.0 + sig * B
+            L = np.log(S / E)
+            bracket_dL = sig / S - eps_ / E
+            U = SI / b_mix - a_mix * b_vec / (b_mix * b_mix)                   # (N,)
+            # dU_i/dT
+            dU_dT = dSI_dT / b_mix - da_mix_dT * b_vec / (b_mix * b_mix)       # (N,)
+            t2 = -L / (RT * (sig - eps_)) * (dU_dT - U / T)
+            t3 = -(rho * b_vec * bracket_dL) / (RT * b_mix * (sig - eps_)) * (da_mix_dT - a_mix / T)
+            # Recompute p at fixed (rho, x, T)
+            p = RT / (v - b_mix) - a_mix / ((v + eps_ * b_mix) * (v + sig * b_mix))
+            dp_dT = self._dp_dT_at_rho(rho, T, x)
+            t4 = -(1.0 / p) * dp_dT + 1.0 / T
+            return t2 + t3 + t4
+        # vdW degenerate
+        p = RT / (v - b_mix) - a_mix / (v * v)
+        dp_dT = self._dp_dT_at_rho(rho, T, x)
+        t23 = -rho / (RT) * (dSI_dT - SI / T)
+        t4 = -(1.0 / p) * dp_dT + 1.0 / T
+        return t23 + t4
+
+    def dlnphi_dp_at_T(self, p, T, x, phase_hint='vapor'):
+        """N-vector d(ln phi)/dp at fixed (T, x).
+
+        Only rho depends on p. So d(ln phi_cubic)/dp = d(ln phi_cubic)/drho_cubic
+        / (dp/drho_cubic)_{T,x}. For Peneloux, add the explicit shift
+        derivative d(c_i * p/RT)/dp = c_i / RT.
+
+        FD-verified to ~1e-8 across phases.
+        """
+        x = np.asarray(x, dtype=np.float64)
+        if self._has_volume_shift:
+            rho_real = self.density_from_pressure(p, T, x, phase_hint=phase_hint)
+            c_m = self.c_mix(x)
+            rho = 1.0 / (1.0 / rho_real + c_m)     # rho_cubic
+        else:
+            rho = self.density_from_pressure(p, T, x, phase_hint=phase_hint)
+        dlnphi_drho = self._dlnphi_drho_at_x(rho, T, x)
+        dp_drho = self._dp_drho_T_value(rho, T, x)
+        dlnphi_dp_cubic = dlnphi_drho / dp_drho
+        if self._has_volume_shift:
+            # Peneloux correction: ln phi_real = ln phi_cubic + c_i * p/(RT)
+            # d/dp at fixed T: + c_i / RT
+            return dlnphi_dp_cubic + self.c_shifts / (self.R * T)
+        return dlnphi_dp_cubic
+
+    def dlnphi_dT_at_p(self, p, T, x, phase_hint='vapor'):
+        """N-vector d(ln phi)/dT at fixed (p, x).
+
+        Combines the partial at fixed rho with the implicit density
+        response to temperature:
+
+            d(ln phi_cubic)/dT|_{p,x} = d(ln phi_cubic)/dT|_{rho,x}
+                                + d(ln phi_cubic)/drho|_{T,x} * drho/dT|_{p,x}
+            drho/dT|_{p,x} = -dp/dT|_{rho,x} / dp/drho|_{T,x}
+
+        For Peneloux, add the explicit shift derivative
+        d(c_i * p/RT)/dT = -c_i * p/(RT^2).
+
+        FD-verified to ~1e-8 across phases.
+        """
+        x = np.asarray(x, dtype=np.float64)
+        if self._has_volume_shift:
+            rho_real = self.density_from_pressure(p, T, x, phase_hint=phase_hint)
+            c_m = self.c_mix(x)
+            rho = 1.0 / (1.0 / rho_real + c_m)     # rho_cubic
+        else:
+            rho = self.density_from_pressure(p, T, x, phase_hint=phase_hint)
+        dlnphi_dT_rho = self._dlnphi_dT_at_rho(rho, T, x)
+        dlnphi_drho = self._dlnphi_drho_at_x(rho, T, x)
+        dp_dT = self._dp_dT_at_rho(rho, T, x)
+        dp_drho = self._dp_drho_T_value(rho, T, x)
+        drho_dT = -dp_dT / dp_drho
+        dlnphi_dT_cubic = dlnphi_dT_rho + dlnphi_drho * drho_dT
+        if self._has_volume_shift:
+            # Peneloux correction: ln phi_real = ln phi_cubic + c_i * p/(RT)
+            # d/dT at fixed p: -c_i * p / (RT^2)
+            return dlnphi_dT_cubic - self.c_shifts * p / (self.R * T * T)
+        return dlnphi_dT_cubic
+
 
 def p_Z(rho, T, a_mix, b_mix, eps_, sig, R):
     """Return Z = p*v/(RT) from (rho, T) and mixture parameters, via the cubic.
