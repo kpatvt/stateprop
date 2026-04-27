@@ -62,8 +62,32 @@ from .flash import (
 from .phase_envelope import trace_phase_envelope, PhaseEnvelope
 from . import mixture
 from . import cubic
+from . import extraction
 
-__version__ = "0.9.57"
+__version__ = "0.9.119"
+
+from .pseudo import (
+    PseudoComponent,
+    make_pseudo_from_NBP_SG,
+    make_pseudo_cut_distribution,
+    make_PR_from_pseudo,
+    make_SRK_from_pseudo,
+    riazi_daubert_Tc, riazi_daubert_Pc, riazi_daubert_MW, riazi_daubert_Vc,
+    edmister_acentric, lee_kesler_acentric, lee_kesler_psat,
+    watson_K, lee_kesler_cp_ig_coeffs, rackett_density,
+)
+from .tbp import (
+    TBPDiscretization, discretize_TBP,
+    discretize_from_D86, discretize_from_D2887,
+    interpolate_TBP, D86_to_TBP, D2887_to_TBP,
+    API_to_SG, SG_to_API, watson_K_to_SG,
+)
+from .chemsep import (
+    lookup_chemsep, chemsep_summary, load_chemsep_database,
+    evaluate_dippr, evaluate_property,
+    get_critical_constants, get_molar_mass, get_formation_properties,
+)
+from . import electrolyte
 
 __all__ = [
     # Core
@@ -85,5 +109,5 @@ __all__ = [
     # Phase envelope
     "trace_phase_envelope", "PhaseEnvelope",
     # Submodules
-    "mixture", "cubic",
+    "mixture", "cubic", "extraction",
 ]

@@ -42,7 +42,7 @@ from .lle_coverage import (lle_coverage, lle_coverage_summary,
                               LLE_BENCHMARKS)
 from .gamma_phi import (GammaPhiFlash, AntoinePsat,
                           BubbleResult, DewResult, FlashResult)
-from .gamma_phi_eos import GammaPhiEOSFlash
+from .gamma_phi_eos import GammaPhiEOSFlash, make_phi_sat_funcs
 from .gamma_phi_eos_3phase import (GammaPhiEOSThreePhaseFlash,
                                      ThreePhaseFlashResult,
                                      SinglePhaseResult, AutoFlashResult)
@@ -62,7 +62,7 @@ __all__ = ['NRTL', 'UNIQUAC', 'UNIFAC',
            'validate_against_benchmarks', 'format_benchmark_results',
            'BenchmarkResult', 'save_overrides_to_json',
            'load_overrides_from_json', 'LLE_BENCHMARKS',
-           'GammaPhiFlash', 'GammaPhiEOSFlash',
+           'GammaPhiFlash', 'GammaPhiEOSFlash', 'make_phi_sat_funcs',
            'GammaPhiEOSThreePhaseFlash', 'ThreePhaseFlashResult',
            'SinglePhaseResult', 'AutoFlashResult',
            'LLEFlash', 'LLEResult',

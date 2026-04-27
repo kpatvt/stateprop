@@ -161,6 +161,97 @@ _COMPOUNDS: Dict[str, Dict[str, int]] = {
     'acetonitrile':   {'CH3CN': 1},
     'propionitrile':  {'CH3': 1, 'CH2CN': 1},
     'butyronitrile':  {'CH3': 1, 'CH2': 1, 'CH2CN': 1},
+    'acrylonitrile':  {'acrylnitrile': 1},   # CH2=CH-CN as one group
+
+    # --- Polar aprotic solvents (v0.9.59 expanded coverage) ---
+    'dmso':           {'DMSO': 1},
+    'dimethyl_sulfoxide': {'DMSO': 1},
+    'dmf':            {'DMF': 1},
+    'dimethylformamide':  {'DMF': 1},
+    'nmp':            {'NMP': 1},
+    'methylpyrrolidone': {'NMP': 1},
+    'sulfolane':      {'CH2SuCH2': 1, 'CH2': 2},   # 4-membered ring: 2 CH2 + 1 CH2SuCH2
+
+    # --- Aromatic heterocycles ---
+    'pyridine':       {'C5H5N': 1},
+    '2-methylpyridine': {'CH3': 1, 'C5H4N': 1},
+    'thiophene':      {'C4H4S': 1},
+    '2-methylthiophene': {'CH3': 1, 'C4H3S': 1},
+    'morpholine':     {'morpholine': 1},
+    'furfural':       {'furfural': 1},
+
+    # --- Halocarbons (chlorinated) ---
+    'dichloromethane':    {'CH2Cl2': 1},
+    'methylene_chloride': {'CH2Cl2': 1},
+    'chloroform':         {'CHCl3': 1},
+    'trichloromethane':   {'CHCl3': 1},
+    'carbon_tetrachloride': {'CCl4': 1},
+    'tetrachloromethane': {'CCl4': 1},
+    '1,2-dichloroethane': {'CH2Cl': 2},
+    'chloromethane':      {'CH2Cl': 1},   # approximate (no CH3Cl group; uses CH2Cl)
+    'chlorobenzene':      {'ACH': 5, 'ACCl': 1},
+    '1-chlorobutane':     {'CH3': 1, 'CH2': 2, 'CH2Cl': 1},
+    'tert-butyl_chloride': {'CH3': 3, 'CCl': 1},   # (CH3)3C-Cl
+
+    # --- Halocarbons (other) ---
+    'iodoethane':         {'CH3': 1, 'CH2': 1, 'I': 1},
+    'iodomethane':        {'CH2': 1, 'I': 1},     # approximate
+    'bromoethane':        {'CH3': 1, 'CH2': 1, 'Br': 1},
+    'bromobenzene':       {'ACH': 5, 'AC-Br': 1},
+
+    # --- Nitro compounds ---
+    'nitromethane':       {'CH3NO2': 1},
+    'nitroethane':        {'CH3': 1, 'CH2NO2': 1},
+    '1-nitropropane':     {'CH3': 1, 'CH2': 1, 'CH2NO2': 1},
+    '2-nitropropane':     {'CH3': 2, 'CHNO2': 1},
+    'nitrobenzene':       {'ACH': 5, 'ACNO2': 1},
+
+    # --- Sulfur compounds ---
+    'carbon_disulfide':   {'CS2': 1},
+    'cs2':                {'CS2': 1},
+    'methanethiol':       {'CH3SH': 1},
+    'ethanethiol':        {'CH3': 1, 'CH2SH': 1},
+    'dimethyl_sulfide':   {'CH3': 1, 'CH3S': 1},
+    'diethyl_sulfide':    {'CH3': 2, 'CH2': 1, 'CH2S': 1},
+
+    # --- Aromatic alcohols ---
+    'phenol':             {'ACH': 5, 'ACOH': 1},
+    'm-cresol':           {'ACH': 4, 'ACCH3': 1, 'ACOH': 1},
+    'aniline':            {'ACH': 5, 'ACNH2': 1},
+
+    # --- Glycol ethers (oxyalcohol functional group, main 47) ---
+    '2-methoxyethanol':   {'CH3': 1, 'C2H4O2': 1},   # CH3-O-CH2-CH2-OH
+    '2-ethoxyethanol':    {'CH3': 1, 'CH2': 1, 'C2H5O2': 1},
+
+    # --- Anhydride ---
+    'acetic_anhydride':   {'CH3': 2, 'O=COC=O': 1},
+
+    # --- Formates ---
+    'methyl_formate':     {'CH3': 1, 'HCOO': 1},
+    'ethyl_formate':      {'CH3': 1, 'CH2': 1, 'HCOO': 1},
+    'propyl_formate':     {'CH3': 1, 'CH2': 2, 'HCOO': 1},
+
+    # --- Amines ---
+    'methylamine':        {'CH3NH2': 1},
+    'ethylamine':         {'CH3': 1, 'CH2NH2': 1},
+    'propylamine':        {'CH3': 1, 'CH2': 1, 'CH2NH2': 1},
+    'isopropylamine':     {'CH3': 2, 'CHNH2': 1},
+    'dimethylamine':      {'CH3': 1, 'CH3NH': 1},
+    'diethylamine':       {'CH3': 2, 'CH2': 1, 'CH2NH': 1},
+    'trimethylamine':     {'CH3': 2, 'CH3N': 1},
+    'triethylamine':      {'CH3': 3, 'CH2': 2, 'CH2N': 1},
+
+    # --- Glycols (polyols) ---
+    '1,2-ethanediol':     {'DOH': 1},   # synonym; main entry already 'ethylene_glycol'
+
+    # --- Aldehydes ---
+    'propanal':           {'CH3': 1, 'CH2': 1, 'HCO': 1},
+    'butanal':            {'CH3': 1, 'CH2': 2, 'HCO': 1},
+    'acetaldehyde':       {'CH3': 1, 'HCO': 1},
+
+    # --- Epoxides (main group 53 oxides) ---
+    'ethylene_oxide':     {'CH2OCH2': 1},
+    'propylene_oxide':    {'CH3': 1, 'CH2OCH': 1},
 }
 
 
@@ -184,6 +275,27 @@ _ALIASES: Dict[str, str] = {
     'meibk': 'mibk',
     'h2o': 'water',
     'h_2_o': 'water',
+    # New aliases for v0.9.59 expanded compound set
+    'dichloromethane': 'dichloromethane',  # canonical
+    'dcm': 'dichloromethane',
+    'mecl2': 'dichloromethane',
+    'tetrachloromethane': 'carbon_tetrachloride',
+    'ccl4': 'carbon_tetrachloride',
+    'chcl3': 'chloroform',
+    'mecn': 'acetonitrile',
+    'pyr': 'pyridine',
+    'meoac': 'methyl_acetate',
+    'etoac': 'ethyl_acetate',
+    'meocho': 'methyl_formate',
+    'etocho': 'ethyl_formate',
+    'me2so': 'dmso',
+    'me2nformamide': 'dmf',
+    'meoh2cch2oh': '2-methoxyethanol',
+    'eo': 'ethylene_oxide',
+    'po': 'propylene_oxide',
+    'meome': 'dimethyl_ether',
+    'etoet': 'diethyl_ether',
+    'cellosolve': '2-ethoxyethanol',
     'hexane': 'n-hexane',
     'heptane': 'n-heptane',
     'octane': 'n-octane',
@@ -262,6 +374,18 @@ def make_unifac_lyngby(names: Sequence[str], **kwargs):
     from .unifac_lyngby import UNIFAC_Lyngby
     groups = [_lookup(n) for n in names]
     return UNIFAC_Lyngby(groups, **kwargs)
+
+
+def make_unifac_lle(names: Sequence[str], **kwargs):
+    """Build a UNIFAC-LLE model for the given compound names.
+
+    UNIFAC-LLE uses group-interaction parameters specifically regressed
+    against liquid-liquid equilibrium data, giving better accuracy for
+    extraction calculations than the standard VLE-fitted parameters.
+    """
+    from .unifac_lle import UNIFAC_LLE
+    groups = [_lookup(n) for n in names]
+    return UNIFAC_LLE(groups, **kwargs)
 
 
 def uniquac_rq(name: str) -> Tuple[float, float]:

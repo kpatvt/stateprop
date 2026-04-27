@@ -366,3 +366,66 @@ class GammaPhiEOSFlash:
             else:
                 T_low = T_mid; f_low = f_mid
         return 0.5 * (T_low + T_high)
+
+
+def make_phi_sat_funcs(
+    mixture,
+    psat_funcs: Sequence[Callable[[float], float]],
+) -> list:
+    """Build per-component saturation fugacity coefficient functions
+    ``Phi_sat,i(T) = phi_V^pure(T, p_sat,i(T))`` from a mixture EOS.
+
+    For each component i, the function evaluates the EOS at the pure-i
+    composition (a unit vector) at temperature T and pressure
+    p_sat,i(T), takes the vapor root, and returns the i-th component
+    of ``exp(ln_phi)``.  This is the textbook saturation-fugacity
+    coefficient that enters the gamma-phi K-value formula:
+
+        K_i = gamma_i * p_sat,i * Phi_sat,i * Poynting_i / (p * phi_V,i)
+
+    Parameters
+    ----------
+    mixture : EOS mixture (CubicMixture or SAFTMixture)
+        Must implement ``density_from_pressure(p, T, x, phase_hint)``
+        and ``ln_phi(rho, T, x)``.
+    psat_funcs : sequence of callables T -> p_sat,i(T) [Pa]
+        Pure-component saturation pressures; one per mixture component
+        in the same order as the EOS.
+
+    Returns
+    -------
+    list of callables T -> Phi_sat,i(T)
+
+    Notes
+    -----
+    For an ideal gas (or a vapor at low p where phi_V -> 1), each
+    Phi_sat -> 1 and these helpers add no information.  Their
+    contribution becomes meaningful above ~10 bar; near or above the
+    critical pressure of any pure component, p_sat is extrapolated
+    and Phi_sat is unreliable.
+    """
+    N = len(psat_funcs)
+    if hasattr(mixture, "N") and mixture.N != N:
+        raise ValueError(
+            f"mixture has N={mixture.N} but psat_funcs has length {N}")
+
+    def _make(i: int):
+        x_pure = np.zeros(N)
+        x_pure[i] = 1.0
+        psat_i = psat_funcs[i]
+        def phi_sat_i(T: float) -> float:
+            p = float(psat_i(T))
+            if p <= 0:
+                return 1.0
+            try:
+                rho = mixture.density_from_pressure(p, T, x_pure,
+                                                     phase_hint="vapor")
+                ln_phi = mixture.ln_phi(rho, T, x_pure)
+                return float(np.exp(ln_phi[i]))
+            except Exception:
+                # Fall back to ideal-gas if EOS fails (e.g. supercritical)
+                return 1.0
+        phi_sat_i.__name__ = f"phi_sat_{i}"
+        return phi_sat_i
+
+    return [_make(i) for i in range(N)]

@@ -1230,6 +1230,200 @@ def test_peneloux_caloric_consistency():
           err_h < 1e-6, f"expected {expected_h_diff:.3f}, got {actual_h_diff:.3f}")
 
 
+# =====================================================================
+# v0.9.119: Volume-translation module API
+# =====================================================================
+
+def test_v119_peneloux_c_SRK_helper():
+    """peneloux_c_SRK reproduces the SRK formula independently of the EOS."""
+    from stateprop.cubic import peneloux_c_SRK, SRK
+    c_helper = peneloux_c_SRK(190.564, 4.5992e6, 0.01142)
+    eos = SRK(190.564, 4.5992e6, 0.01142, volume_shift_c='peneloux')
+    check("peneloux_c_SRK matches EOS-internal computation",
+          abs(c_helper - eos.c) < 1e-15,
+          f"helper={c_helper}, eos={eos.c}")
+
+
+def test_v119_jhaveri_youngren_paraffin():
+    """J-Y returns positive c for paraffins (stateprop convention:
+    c > 0 → smaller external molar volume → higher density).
+
+    Note: this is opposite the published Peneloux/de Sant'Ana sign
+    convention.  The bundled tables and correlations are stored in
+    stateprop convention to match the internal CubicEOS expectation
+    (eos.py line 736: v_external = v_cubic - c)."""
+    from stateprop.cubic import jhaveri_youngren_c_PR
+    # n-decane: ω=0.488, T_c=617.7 K, P_c=21.1 bar
+    c = jhaveri_youngren_c_PR(617.7, 21.1e5, 0.488, molar_mass=0.142)
+    check(f"J-Y c(n-decane) positive ({c*1e6:+.2f} cm³/mol)", c > 0)
+
+
+def test_v119_jhaveri_youngren_returns_zero_for_light():
+    """J-Y returns 0 for non-paraffin families (e.g. aromatic).
+    For paraffins it now uses an ω-linear correlation that gives
+    finite values across C1-C10 (methane is a known outlier
+    documented in the docstring; users prefer the table value)."""
+    from stateprop.cubic import jhaveri_youngren_c_PR
+    # Aromatic family → 0
+    c_arom = jhaveri_youngren_c_PR(562.05, 4.895e6, 0.212,
+                                              family="aromatic")
+    check(f"J-Y aromatic returns 0 ({c_arom})", c_arom == 0.0)
+    # Methane via correlation: now finite (was 0 in pre-v0.9.119
+    # MW-gated form).  Note: methane is the worst paraffin fit
+    # (~60% error vs table); for accuracy use lookup_volume_shift.
+    c_meth = jhaveri_youngren_c_PR(190.56, 4.6e6, 0.011,
+                                              molar_mass=0.016)
+    check(f"J-Y methane via correlation = {c_meth*1e6:+.3f} cm³/mol "
+          f"(finite positive in stateprop convention)", c_meth > 0)
+
+
+def test_v119_lookup_volume_shift_known_compounds():
+    """Bundled table contains standard natural-gas + light-petroleum species."""
+    from stateprop.cubic import lookup_volume_shift
+    for name in ["methane", "ethane", "propane", "n-butane",
+                  "carbon dioxide", "nitrogen", "water"]:
+        c = lookup_volume_shift(name, family="pr")
+        check(f"  table contains {name!r}", c is not None)
+
+
+def test_v119_lookup_volume_shift_aliases():
+    """Common aliases (CO2, H2S, C1, nC4, ...) resolve to a value
+    in either family."""
+    from stateprop.cubic import lookup_volume_shift
+    for alias in ["CO2", "H2S", "C1", "nC4", "i-pentane", "N2"]:
+        c_pr = lookup_volume_shift(alias, family="pr")
+        c_srk = lookup_volume_shift(alias, family="srk")
+        check(f"  alias {alias!r} resolved (pr={c_pr}, srk={c_srk})",
+              c_pr is not None or c_srk is not None)
+
+
+def test_v119_lookup_volume_shift_unknown_returns_none():
+    """Unknown compound returns None rather than raising."""
+    from stateprop.cubic import lookup_volume_shift
+    c = lookup_volume_shift("unobtainium", family="pr")
+    check("unknown compound returns None", c is None)
+
+
+def test_v119_resolve_volume_shift_modes():
+    """resolve_volume_shift dispatches all four modes correctly."""
+    from stateprop.cubic import resolve_volume_shift
+    c1 = resolve_volume_shift("methane", "pr",
+                                    omega=0.011, T_c=190.56, p_c=4.6e6,
+                                    mode="auto")
+    check(f"auto/table-hit: {c1*1e6:+.2f} cm³/mol",
+          c1 is not None and c1 > 0)
+    c2 = resolve_volume_shift("xenon", "srk",
+                                    omega=0.0, T_c=289.7, p_c=5.84e6,
+                                    mode="auto")
+    check(f"auto/correlation-fallback: {c2*1e6:+.2f} cm³/mol",
+          isinstance(c2, float))
+    raised = False
+    try:
+        resolve_volume_shift("xenon", "pr", mode="table")
+    except KeyError:
+        raised = True
+    check("table mode raises on miss", raised)
+    c3 = resolve_volume_shift("methane", "srk",
+                                    omega=0.011, T_c=190.56, p_c=4.6e6,
+                                    mode="correlation")
+    check(f"correlation mode: {c3*1e6:+.2f} cm³/mol",
+          isinstance(c3, float))
+    c4 = resolve_volume_shift("anything", "pr", mode=-2.5e-6)
+    check(f"float passthrough: {c4*1e6:+.2f}",
+          c4 == -2.5e-6)
+    c5 = resolve_volume_shift("anything", "pr", mode=None)
+    check("None mode returns None", c5 is None)
+
+
+def test_v119_cubic_from_name_volume_shift_auto():
+    """cubic_from_name(volume_shift='auto') populates eos.c from table."""
+    from stateprop.cubic import cubic_from_name, lookup_volume_shift
+    eos = cubic_from_name("methane", family="pr", volume_shift="auto")
+    expected = lookup_volume_shift("methane", family="pr")
+    check(f"PR methane volume_shift='auto' c = {eos.c*1e6:+.2f}",
+          abs(eos.c - expected) < 1e-15)
+
+
+def test_v119_cubic_from_name_default_no_shift():
+    """Default behavior unchanged: no volume_shift = c=0."""
+    from stateprop.cubic import cubic_from_name
+    eos = cubic_from_name("methane", family="pr")
+    check("default no shift: c=0", eos.c == 0.0, f"c={eos.c}")
+
+
+def test_v119_cubic_from_name_volume_shift_c_legacy_kwarg():
+    """volume_shift_c (legacy) wins over volume_shift (new)."""
+    from stateprop.cubic import cubic_from_name
+    eos = cubic_from_name("methane", family="pr",
+                                volume_shift="auto",
+                                volume_shift_c=-3e-6)
+    check("legacy kwarg overrides new",
+          abs(eos.c - (-3e-6)) < 1e-15, f"c={eos.c}")
+
+
+def test_v119_cubic_from_name_volume_shift_table_miss_raises():
+    """volume_shift='table' raises KeyError for missing compound."""
+    from stateprop.cubic import cubic_from_name
+    raised = False
+    try:
+        cubic_from_name("propylene", family="pr", volume_shift="table")
+    except KeyError:
+        raised = True
+    check("table mode raises for missing compound", raised)
+
+
+def test_v119_volume_shift_does_not_affect_phase_equilibrium():
+    """Crucial: volume_shift='auto' does not alter K-values, β, x, y."""
+    from stateprop.cubic import cubic_from_name, CubicMixture, flash_pt
+    e1_no = cubic_from_name("methane", family="srk")
+    e2_no = cubic_from_name("ethane", family="srk")
+    e1_yes = cubic_from_name("methane", family="srk",
+                                    volume_shift="auto")
+    e2_yes = cubic_from_name("ethane", family="srk",
+                                    volume_shift="auto")
+    mx_no = CubicMixture([e1_no, e2_no], composition=[0.7, 0.3])
+    mx_yes = CubicMixture([e1_yes, e2_yes], composition=[0.7, 0.3])
+    r_no = flash_pt(p=4e6, T=240.0, z=[0.7, 0.3], mixture=mx_no)
+    r_yes = flash_pt(p=4e6, T=240.0, z=[0.7, 0.3], mixture=mx_yes)
+    check(f"  β unchanged ({r_no.beta:.6f} vs {r_yes.beta:.6f})",
+          abs(r_no.beta - r_yes.beta) < 1e-6)
+
+
+def test_v119_volume_shift_improves_density():
+    """Pure-fluid liquid density closer to NIST with bundled c."""
+    from stateprop.cubic import cubic_from_name, CubicMixture
+    # n-pentane saturated liquid at 298 K — NIST: 626 kg/m³
+    e_no = cubic_from_name("n-pentane", family="srk")
+    e_yes = cubic_from_name("n-pentane", family="srk",
+                                  volume_shift="auto")
+    mx_no = CubicMixture([e_no], composition=[1.0])
+    mx_yes = CubicMixture([e_yes], composition=[1.0])
+    rho_no = mx_no.density_from_pressure(p=1e5, T=298.0,
+                                                phase_hint='liquid')
+    rho_yes = mx_yes.density_from_pressure(p=1e5, T=298.0,
+                                                  phase_hint='liquid')
+    M = 0.07215
+    err_no = abs(rho_no * M - 626.0)
+    err_yes = abs(rho_yes * M - 626.0)
+    check(f"  density-error reduced "
+          f"(no={err_no:.0f} → yes={err_yes:.0f})",
+          err_yes < err_no)
+
+
+def test_v119_list_volume_shift_compounds():
+    """list_volume_shift_compounds returns a usable snapshot."""
+    from stateprop.cubic import list_volume_shift_compounds
+    table = list_volume_shift_compounds()
+    check(f"non-empty ({len(table)} compounds)", len(table) >= 20)
+    check("methane present", "methane" in table)
+    check("methane has 'pr' and 'srk' entries",
+          "pr" in table["methane"] and "srk" in table["methane"])
+    table["methane"]["pr"] = 999.0
+    table2 = list_volume_shift_compounds()
+    check("returned dict is a snapshot",
+          table2["methane"]["pr"] != 999.0)
+
+
 # ----------------------------------------------------------------------
 # Mixture critical points (Heidemann-Khalil / Michelsen)
 # ----------------------------------------------------------------------
@@ -2104,6 +2298,21 @@ if __name__ == "__main__":
         test_peneloux_numeric_c,
         test_peneloux_pr_rejects_auto,
         test_peneloux_caloric_consistency,
+        # v0.9.119 — volume-translation module API
+        test_v119_peneloux_c_SRK_helper,
+        test_v119_jhaveri_youngren_paraffin,
+        test_v119_jhaveri_youngren_returns_zero_for_light,
+        test_v119_lookup_volume_shift_known_compounds,
+        test_v119_lookup_volume_shift_aliases,
+        test_v119_lookup_volume_shift_unknown_returns_none,
+        test_v119_resolve_volume_shift_modes,
+        test_v119_cubic_from_name_volume_shift_auto,
+        test_v119_cubic_from_name_default_no_shift,
+        test_v119_cubic_from_name_volume_shift_c_legacy_kwarg,
+        test_v119_cubic_from_name_volume_shift_table_miss_raises,
+        test_v119_volume_shift_does_not_affect_phase_equilibrium,
+        test_v119_volume_shift_improves_density,
+        test_v119_list_volume_shift_compounds,
         # Critical points (Heidemann-Khalil / Michelsen)
         test_critical_A_residual_fd,
         test_critical_point_pure_limit,

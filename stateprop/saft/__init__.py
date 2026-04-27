@@ -43,6 +43,12 @@ from .eos import (
     ACETONE, DME,
 )
 from .mixture import SAFTMixture
+from .database import (
+    lookup_pcsaft, lookup_binary, lookup_kij,
+    make_saft_mixture,
+    load_pure_database, load_binary_database,
+    database_summary,
+)
 
 __all__ = [
     "PCSAFT", "SAFTMixture",
@@ -51,4 +57,9 @@ __all__ = [
     # v0.9.23
     "WATER", "METHANOL", "ETHANOL", "N_PROPANOL",
     "ACETONE", "DME",
+    # v0.9.93 — bundled FeOS PC-SAFT databases
+    "lookup_pcsaft", "lookup_binary", "lookup_kij",
+    "make_saft_mixture",
+    "load_pure_database", "load_binary_database",
+    "database_summary",
 ]

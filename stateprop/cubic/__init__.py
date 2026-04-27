@@ -60,6 +60,13 @@ from .from_chemicals import (
     cubic_mixture_from_names,
     chemicals_available,
 )
+from .volume_translation import (
+    peneloux_c_SRK,
+    jhaveri_youngren_c_PR,
+    lookup_volume_shift,
+    list_volume_shift_compounds,
+    resolve_volume_shift,
+)
 
 __all__ = [
     "CubicEOS",
@@ -84,4 +91,8 @@ __all__ = [
     "PR_from_name", "PR78_from_name", "SRK_from_name",
     "RK_from_name", "VDW_from_name",
     "cubic_mixture_from_names", "chemicals_available",
+    # Volume translation (v0.9.119)
+    "peneloux_c_SRK", "jhaveri_youngren_c_PR",
+    "lookup_volume_shift", "list_volume_shift_compounds",
+    "resolve_volume_shift",
 ]

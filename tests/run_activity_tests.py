@@ -1473,6 +1473,70 @@ def test_compounds_aliases_work():
     check(f"All 8 aliases resolve correctly", all_ok)
 
 
+def test_compounds_v0959_polar_aprotic_solvents():
+    """v0.9.59-added compounds resolve and produce sensible UNIFAC γ."""
+    from stateprop.activity.compounds import get_groups
+    from stateprop.activity import UNIFAC
+
+    # All these compounds were added with v0.9.59 expanded UNIFAC database
+    new_compounds = [
+        'dmso', 'nmp', 'dmf', 'pyridine', 'sulfolane', 'morpholine',
+        'chloroform', 'dichloromethane', 'carbon_tetrachloride',
+        'nitromethane', 'carbon_disulfide', '2-ethoxyethanol',
+        'ethyl_formate', 'phenol', 'aniline', 'triethylamine',
+        'ethylene_oxide', 'propylene_oxide', 'acetonitrile',
+        'methylamine', 'ethylamine', 'methyl_formate',
+    ]
+    missing = []
+    for n in new_compounds:
+        try:
+            get_groups(n)
+        except Exception:
+            missing.append(n)
+    check(f"All v0.9.59 new compounds resolve: missing={missing}",
+          not missing)
+
+
+def test_compounds_v0959_aliases():
+    """Common abbreviations for v0.9.59-added compounds resolve."""
+    from stateprop.activity.compounds import get_groups
+    pairs = [
+        ('dcm', 'dichloromethane'),
+        ('ccl4', 'carbon_tetrachloride'),
+        ('chcl3', 'chloroform'),
+        ('me2so', 'dmso'),
+        ('cs2', 'carbon_disulfide'),
+        ('cellosolve', '2-ethoxyethanol'),
+        ('eo', 'ethylene_oxide'),
+        ('po', 'propylene_oxide'),
+    ]
+    all_ok = True
+    for alias, canonical in pairs:
+        if get_groups(alias) != get_groups(canonical):
+            all_ok = False
+            break
+    check(f"All v0.9.59 new aliases resolve correctly", all_ok)
+
+
+def test_compounds_dmso_water_unifac_gives_negative_deviation():
+    """DMSO/water must show γ_DMSO < 1 in dilute aqueous (H-bond accepting)."""
+    from stateprop.activity.compounds import make_unifac
+    g = make_unifac(['dmso', 'water'])
+    gamma = g.gammas(298.15, [0.05, 0.95])
+    check(f"DMSO/water at x_DMSO=0.05: γ_DMSO = {gamma[0]:.3f} (< 1)",
+          gamma[0] < 0.5)
+
+
+def test_compounds_chloroform_water_unifac_gives_immiscible_signal():
+    """Chloroform/water should give γ_CHCl3 > 50 (highly positive deviation)."""
+    from stateprop.activity.compounds import make_unifac
+    g = make_unifac(['chloroform', 'water'])
+    gamma = g.gammas(298.15, [0.001, 0.999])
+    # Infinite dilution gamma is the right metric for immiscibility signal
+    check(f"Chloroform/water γ^∞_CHCl3 = {gamma[0]:.1f} (>> 1)",
+          gamma[0] > 50)
+
+
 def test_compounds_unknown_raises():
     """Unknown compound name raises KeyError with helpful message."""
     from stateprop.activity.compounds import get_groups
@@ -2235,6 +2299,103 @@ def test_lle_user_overrides_change_validation():
               base_bnf.converged != mod_bnf.converged)
 
 
+# ------------------------------------------------------------------------
+# v0.9.59 — Expanded UNIFAC parameter database (Hansen 1991 + Wittig 2003
+#          + Balslev-Abildskov 2002): 119 subgroups, 55 main groups,
+#          1400 a(i,j) entries.
+# ------------------------------------------------------------------------
+
+
+def test_unifac_database_full_coverage():
+    """Full database has 119 subgroups, 55 main groups, 1400 interactions."""
+    from stateprop.activity import unifac_database as db
+    check(f"SUBGROUPS count = 119: {len(db.SUBGROUPS)}",
+          len(db.SUBGROUPS) == 119)
+    check(f"A_MAIN main groups = 55: {len(db.A_MAIN)}",
+          len(db.A_MAIN) == 55)
+    n_params = sum(len(r) for r in db.A_MAIN.values())
+    check(f"Total a(i,j) entries = 1400: {n_params}",
+          n_params == 1400)
+
+
+def test_unifac_database_main_group_indices():
+    """Main groups are 1-50 and 52-56 (51 intentionally skipped)."""
+    from stateprop.activity import unifac_database as db
+    expected = set(range(1, 51)) | set(range(52, 57))
+    actual = set(db.A_MAIN.keys())
+    check(f"Main group ids: missing={expected - actual}, "
+          f"unexpected={actual - expected}",
+          actual == expected)
+
+
+def test_unifac_database_known_anchor_values():
+    """Reference values from Hansen 1991 Table 5."""
+    from stateprop.activity import unifac_database as db
+    cases = [
+        ((1, 5), 986.5),     # CH2-OH
+        ((5, 1), 156.4),     # OH-CH2
+        ((1, 7), 1318.0),    # CH2-H2O
+        ((7, 1), 300.0),     # H2O-CH2
+        ((5, 7), 353.5),     # OH-H2O
+        ((7, 5), -229.1),    # H2O-OH (most consequential for alcohol-water VLE)
+        ((1, 2), 86.02),     # CH2-C=C
+        ((1, 3), 61.13),     # CH2-ACH
+        ((1, 9), 476.4),     # CH2-CH2CO (ketone)
+        ((1, 11), 232.1),    # CH2-CCOO (ester)
+        ((1, 20), 663.5),    # CH2-COOH
+        ((20, 7), 66.17),    # COOH-H2O (Hansen 1991; HTML Table 2 had typo -66.17)
+        ((7, 20), -14.09),   # H2O-COOH
+    ]
+    bad = []
+    for (i, j), expected in cases:
+        actual = db.A_MAIN.get(i, {}).get(j)
+        if actual != expected:
+            bad.append(((i, j), actual, expected))
+    check(f"All {len(cases)} anchor values correct: {bad}", not bad)
+
+
+def test_unifac_database_diagonals_zero():
+    """a(i,i) = 0 by convention for all main groups."""
+    from stateprop.activity import unifac_database as db
+    bad = []
+    for i in db.A_MAIN:
+        if db.A_MAIN[i].get(i, 0.0) != 0.0:
+            bad.append((i, db.A_MAIN[i][i]))
+    check(f"All diagonals zero: {bad}", not bad)
+
+
+def test_unifac_database_includes_new_main_groups():
+    """Verify newly-available main groups (35 DMSO, 44 NMP, 39 DMF, etc.)
+    are now in the database."""
+    from stateprop.activity import unifac_database as db
+    new_subs = ['DMSO', 'NMP', 'DMF', 'CS2', 'furfural', 'CCl4',
+                 'C5H5N', 'ACOH', 'CHCl3', 'I', 'Br']
+    missing = [n for n in new_subs if n not in db.SUBGROUPS]
+    check(f"All expected new subgroups present: missing={missing}",
+          not missing)
+
+
+def test_unifac_compute_gammas_for_DMSO_water():
+    """DMSO-water (main 35 - main 7) should give γ < 1 for DMSO at low x
+    (strong negative deviation due to H-bonding)."""
+    from stateprop.activity import UNIFAC
+    g = UNIFAC([{'DMSO': 1}, {'H2O': 1}])
+    gamma = g.gammas(298.15, [0.1, 0.9])
+    # Expect γ_DMSO < 1 in dilute aqueous regime (strong solvation)
+    check(f"DMSO-water at x_DMSO=0.1: γ = {gamma}",
+          gamma[0] < 1.0 and 0.9 < gamma[1] < 1.1)
+
+
+def test_unifac_compute_gammas_for_acetone_water():
+    """Acetone-water (main 9 ketone with main 7) should show modest
+    positive deviation."""
+    from stateprop.activity import UNIFAC
+    g = UNIFAC([{'CH3': 1, 'CH3CO': 1}, {'H2O': 1}])
+    gamma = g.gammas(298.15, [0.1, 0.9])
+    check(f"Acetone-water at x_acetone=0.1: γ = {gamma}",
+          gamma[0] > 1.5 and gamma[1] > 1.0)
+
+
 def main():
     for fn in [
         test_nrtl_pure_limit,
@@ -2332,6 +2493,10 @@ def main():
         # v0.9.50 -- pre-built compound database
         test_compounds_database_has_basics,
         test_compounds_aliases_work,
+        test_compounds_v0959_polar_aprotic_solvents,
+        test_compounds_v0959_aliases,
+        test_compounds_dmso_water_unifac_gives_negative_deviation,
+        test_compounds_chloroform_water_unifac_gives_immiscible_signal,
         test_compounds_unknown_raises,
         test_make_unifac_from_names,
         test_make_unifac_dortmund_from_names,
@@ -2385,6 +2550,14 @@ def main():
         test_lle_overrides_json_roundtrip,
         test_lle_overrides_json_load_user_format,
         test_lle_user_overrides_change_validation,
+        # v0.9.59 — Expanded UNIFAC parameter database
+        test_unifac_database_full_coverage,
+        test_unifac_database_main_group_indices,
+        test_unifac_database_known_anchor_values,
+        test_unifac_database_diagonals_zero,
+        test_unifac_database_includes_new_main_groups,
+        test_unifac_compute_gammas_for_DMSO_water,
+        test_unifac_compute_gammas_for_acetone_water,
     ]:
         print(f"\n[{fn.__name__}]")
         fn()

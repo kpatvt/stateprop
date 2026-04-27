@@ -1,0 +1,75 @@
+======================================================================
+stateprop examples test runner
+  examples dir: /home/claude/stateprop/examples
+  examples found: 66
+  mode: smoke (default)
+  timeout per example: 90s
+======================================================================
+[ ... ] 01_saturation_curve.py  [ OK  ] 01_saturation_curve.py  (no harness checks) [0.8s]
+[ ... ] 02_steam_tables.py  [ OK  ] 02_steam_tables.py  (no harness checks) [0.9s]
+[ ... ] 03_rankine_cycle.py  [ OK  ] 03_rankine_cycle.py  (no harness checks) [4.6s]
+[ ... ] 04_phase_envelope_pure.py  [ OK  ] 04_phase_envelope_pure.py  (no harness checks) [3.3s]
+[ ... ] 05_property_grid.py  [ OK  ] 05_property_grid.py  (no harness checks) [0.7s]
+[ ... ] 05b_property_grid_mass_based.py  [ OK  ] 05b_property_grid_mass_based.py  (no harness checks) [0.6s]
+[ ... ] 06_compressed_natural_gas_storage.py  [ OK  ] 06_compressed_natural_gas_storage.py  (8/8 checks) [0.5s]
+[ ... ] 07_joule_thomson_inversion.py  [ OK  ] 07_joule_thomson_inversion.py  (6/6 checks) [0.7s]
+[ ... ] 08_natural_gas_flash.py  [ OK  ] 08_natural_gas_flash.py  (no harness checks) [3.0s]
+[ ... ] 09_cubic_phase_envelope.py  [ OK  ] 09_cubic_phase_envelope.py  (no harness checks) [2.7s]
+[ ... ] 11_lng_two_phase_flash.py  [ OK  ] 11_lng_two_phase_flash.py  (6/6 checks) [1.3s]
+[ ... ] 12_volume_translation_workflow.py  [ OK  ] 12_volume_translation_workflow.py  (4/4 checks) [0.4s]
+[ ... ] 13_pseudo_components.py  [ OK  ] 13_pseudo_components.py  (no harness checks) [0.4s]
+[ ... ] 14_tbp_discretization.py  [ OK  ] 14_tbp_discretization.py  (no harness checks) [0.4s]
+[ ... ] 15_natural_gas_dewpoint_design.py  [ OK  ] 15_natural_gas_dewpoint_design.py  (7/7 checks) [1.0s]
+[ ... ] 16_cubic_database_integration.py  [ OK  ] 16_cubic_database_integration.py  (no harness checks) [0.7s]
+[ ... ] 16b_chemsep_database.py  [ OK  ] 16b_chemsep_database.py  (no harness checks) [0.5s]
+[ ... ] 16c_pcsaft_database.py  [ OK  ] 16c_pcsaft_database.py  (no harness checks) [1.9s]
+[ ... ] 17_binary_vle.py  [ OK  ] 17_binary_vle.py  (no harness checks) [1.6s]
+[ ... ] 18_lle_water_butanol.py  [ OK  ] 18_lle_water_butanol.py  (no harness checks) [0.5s]
+[ ... ] 19_lle_extraction.py  [ OK  ] 19_lle_extraction.py  (no harness checks) [5.8s]
+[ ... ] 20_nrtl_lle_regression.py  [ OK  ] 20_nrtl_lle_regression.py  (no harness checks) [1.7s]
+[ ... ] 21_residue_curves_methanol_methyl_acetate.py  [ OK  ] 21_residue_curves_methanol_methyl_acetate.py  (8/8 checks) [2.0s]
+[ ... ] 22_excess_enthalpy_validation.py  [ OK  ] 22_excess_enthalpy_validation.py  (7/7 checks) [0.5s]
+[ ... ] 23_unifac_dortmund_vs_classic.py  [ OK  ] 23_unifac_dortmund_vs_classic.py  (7/7 checks) [0.5s]
+[ ... ] 24_auto_flash_phase_types.py  [ OK  ] 24_auto_flash_phase_types.py  (no harness checks) [0.7s]
+[ ... ] 25_stability_tpd_diagnostic.py  [ OK  ] 25_stability_tpd_diagnostic.py  (no harness checks) [0.6s]
+[ ... ] 26_partial_vaporization_drum.py  [ OK  ] 26_partial_vaporization_drum.py  (no harness checks) [5.1s]
+[ ... ] 27_critical_locus_binary.py  [ OK  ] 27_critical_locus_binary.py  (7/7 checks) [0.5s]
+[ ... ] 28_state_function_flashes.py  [ OK  ] 28_state_function_flashes.py  (5/5 checks) [0.8s]
+[ ... ] 29_saft_pure_and_mixture.py  [ OK  ] 29_saft_pure_and_mixture.py  (no harness checks) [3.2s]
+[ ... ] 31_water_alcohol_density_pcsaft.py  [ OK  ] 31_water_alcohol_density_pcsaft.py  (7/7 checks) [2.7s]
+[ ... ] 32_transport_properties.py  [ OK  ] 32_transport_properties.py  (no harness checks) [1.4s]
+[ ... ] 33_natural_gas_pipeline_pressure_drop.py  [ OK  ] 33_natural_gas_pipeline_pressure_drop.py  (7/7 checks) [0.7s]
+[ ... ] 34_reaction_equilibrium_classics.py  [ OK  ] 34_reaction_equilibrium_classics.py  (no harness checks) [1.7s]
+[ ... ] 35_steam_methane_reforming.py  [ OK  ] 35_steam_methane_reforming.py  (no harness checks) [1.8s]
+[ ... ] 36_real_gas_K_eq_industrial.py  [ OK  ] 36_real_gas_K_eq_industrial.py  (no harness checks) [2.1s]
+[ ... ] 37_liquid_phase_esterification.py  [ OK  ] 37_liquid_phase_esterification.py  (no harness checks) [1.7s]
+[ ... ] 38_gibbs_minimization_methanol.py  [ OK  ] 38_gibbs_minimization_methanol.py  (8/8 checks) [0.5s]
+[ ... ] 39_distillation_benzene_toluene.py  [ OK  ] 39_distillation_benzene_toluene.py  (no harness checks) [4.2s]
+[ ... ] 40_distillation_q_partial_condenser.py  [ OK  ] 40_distillation_q_partial_condenser.py  (no harness checks) [3.0s]
+[ ... ] 41_distillation_multifeed_sidedraw.py  [ OK  ] 41_distillation_multifeed_sidedraw.py  (no harness checks) [3.4s]
+[ ... ] 42_tray_sizing_and_flooding.py  [ OK  ] 42_tray_sizing_and_flooding.py  (5/5 checks) [1.1s]
+[ ... ] 43_cpr_jacobian_speedup.py  [ OK  ] 43_cpr_jacobian_speedup.py  (2/2 checks) [9.2s]
+[ ... ] 44_reactive_distillation_methyl_acetate.py  [ OK  ] 44_reactive_distillation_methyl_acetate.py  (no harness checks) [2.9s]
+[ ... ] 45_reactive_distillation_energy_balance.py  [ OK  ] 45_reactive_distillation_energy_balance.py  (no harness checks) [2.6s]
+[ ... ] 46_reactive_flash_esterification.py  [ OK  ] 46_reactive_flash_esterification.py  (no harness checks) [15.6s]
+[ ... ] 47_reactive_extraction_energy_balance.py  [ OK  ] 47_reactive_extraction_energy_balance.py  (no harness checks) [4.4s]
+[SKIP] 48_crude_atmospheric_tower.py  (long-running; set STATEPROP_EXAMPLES_FULL=1 to enable)
+[ ... ] 49_pitzer_single_salt.py  [ OK  ] 49_pitzer_single_salt.py  (no harness checks) [0.4s]
+[ ... ] 50_multi_electrolyte_brines.py  [ OK  ] 50_multi_electrolyte_brines.py  (no harness checks) [0.4s]
+[ ... ] 51_mineral_scaling.py  [ OK  ] 51_mineral_scaling.py  (no harness checks) [0.5s]
+[ ... ] 52_co2_sequestration_in_aquifer.py  [ OK  ] 52_co2_sequestration_in_aquifer.py  (7/7 checks) [0.4s]
+[ ... ] 53_seawater_carbonate_chemistry.py  [ OK  ] 53_seawater_carbonate_chemistry.py  (7/7 checks) [0.4s]
+[ ... ] 54_geothermal_brine_at_300C.py  [ OK  ] 54_geothermal_brine_at_300C.py  (8/8 checks) [0.4s]
+[ ... ] 55_sour_water_stripper_basic.py  [ OK  ] 55_sour_water_stripper_basic.py  (no harness checks) [0.5s]
+[ ... ] 56_sour_water_two_stage.py  [ OK  ] 56_sour_water_two_stage.py  (5/5 checks) [33.9s]
+[ ... ] 57_sour_water_with_pitzer_corrections.py  [ OK  ] 57_sour_water_with_pitzer_corrections.py  (8/8 checks) [0.5s]
+[ ... ] 58_amine_absorber_design.py  [ OK  ] 58_amine_absorber_design.py  (7/7 checks) [7.7s]
+[ ... ] 59_amine_stripper_design.py  [ OK  ] 59_amine_stripper_design.py  (7/7 checks) [23.0s]
+[ ... ] 60_amine_capture_flowsheet_pdh.py  [ OK  ] 60_amine_capture_flowsheet_pdh.py  (7/7 checks) [6.9s]
+[ ... ] 62_chen_song_vs_pdh_at_high_T.py  [ OK  ] 62_chen_song_vs_pdh_at_high_T.py  (7/7 checks) [0.5s]
+[ ... ] 63_solvent_screening_mea_mdea_dea.py  [ OK  ] 63_solvent_screening_mea_mdea_dea.py  (7/7 checks) [3.6s]
+[ ... ] 66_aqueous_mineral_pitzer.py  [ OK  ] 66_aqueous_mineral_pitzer.py  (8/8 checks) [0.5s]
+[ ... ] 67_thermo_consistency_checks.py  [ OK  ] 67_thermo_consistency_checks.py  (7/7 checks) [0.5s]
+[SKIP] 99_benchmark.py  (in SKIP list)
+----------------------------------------------------------------------
+RESULT: 64 passed, 0 failed, 2 skipped

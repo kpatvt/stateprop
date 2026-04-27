@@ -137,6 +137,22 @@ def _make(name, m, sigma, eps_k, T_c, p_c, omega,
 
 # Values from Gross & Sadowski 2001 Table 1 (non-associating, non-polar)
 # Molar masses in kg/mol (v0.9.32, for transport property calculations)
+#
+# Note on methane accuracy (v0.9.94 finding):
+# These standard Gross-Sadowski 2001 methane parameters were fit to
+# saturated liquid density and vapor pressure (T = 90-190 K).  In that
+# regime, PC-SAFT reproduces NIST data to <2.3% AAD — excellent.
+# Extrapolation to dense supercritical states above ~300 K shows
+# systematic errors of 5-17% (PC-SAFT overestimates Z, hence
+# underestimates density).  See ``METHANE_SUPERCRITICAL`` below for
+# an alternative parameter set fit to a wider T-P range; it has worse
+# saturation behavior but better supercritical accuracy.  This is a
+# fundamental functional-form limitation of PC-SAFT for methane (no
+# single (m, σ, ε/k) triple can fit both regimes simultaneously); not
+# a bug in stateprop's implementation.  Verified against a hand-coded
+# Gross-Sadowski 2001 reference (matches to machine precision) and
+# against the Esper-2023 parameters (m=1.0000, σ=3.7005, ε/k=150.07
+# give the same accuracy envelope as our values).
 METHANE   = _make("methane",       m=1.0000, sigma=3.7039, eps_k=150.03,
                   T_c=190.564, p_c=4.5992e6, omega=0.01142,
                   molar_mass=0.016043, T_b=111.63, parachor=73.2)

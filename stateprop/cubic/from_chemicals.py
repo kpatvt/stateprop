@@ -256,21 +256,44 @@ _FAMILY_FACTORY = {
 }
 
 
-def cubic_from_name(identifier: str, family: str = "pr", **kwargs) -> CubicEOS:
+def cubic_from_name(identifier: str, family: str = "pr",
+                       volume_shift: object = None,
+                       **kwargs) -> CubicEOS:
     """Build a single-component CubicEOS by name.
 
     Parameters
     ----------
     identifier : str   Chemical identifier (name, formula, CAS, etc.)
     family : str       One of "pr" (default), "pr78", "srk", "rk", "vdw".
+    volume_shift : str | float | None, default None
+        Volume translation policy (v0.9.119).  If supplied:
+
+        - ``"auto"``: look up the compound in the bundled table
+          (:mod:`stateprop.cubic.volume_translation`), falling back to
+          the family correlation (Peneloux 1982 for SRK / RK,
+          Jhaveri-Youngren 1988 for PR / PR78).
+        - ``"table"``: bundled table only.  Raises KeyError if missing.
+        - ``"correlation"``: family correlation only, ignoring the table.
+        - ``float``: pass-through user-supplied c [m³/mol].
+        - ``None`` (default): no volume shift, c=0.
+
+        If both ``volume_shift`` and ``volume_shift_c`` (the lower-level
+        kwarg) are supplied, ``volume_shift_c`` wins.  ``volume_shift``
+        is a higher-level convenience that auto-resolves c from the
+        bundled DB; ``volume_shift_c`` is the literal CubicEOS field.
     **kwargs           Extra arguments passed through to the EOS factory
                        (e.g., ``volume_shift_c``, ``use_pr78``).
 
     Examples
     --------
-    >>> eos = cubic_from_name("propane")                    # PR by default
-    >>> eos = cubic_from_name("water", family="srk")
-    >>> eos = cubic_from_name("n-hexane", family="pr78")
+    >>> # Plain PR for propane
+    >>> eos = cubic_from_name("propane")
+
+    >>> # SRK with auto volume shift (table → correlation fallback)
+    >>> eos = cubic_from_name("water", family="srk", volume_shift="auto")
+
+    >>> # PR with bundled-table-only lookup (raises if compound missing)
+    >>> eos = cubic_from_name("benzene", volume_shift="table")
     """
     props = lookup_pure_component(identifier)
     fam = family.lower()
@@ -280,6 +303,24 @@ def cubic_from_name(identifier: str, family: str = "pr", **kwargs) -> CubicEOS:
             f"Expected one of {list(_FAMILY_FACTORY)}."
         )
     factory = _FAMILY_FACTORY[fam]
+
+    # Resolve volume_shift policy (v0.9.119) into a numeric c, unless the
+    # caller has already supplied volume_shift_c directly (in which case
+    # that wins, preserving backward compatibility).
+    if volume_shift is not None and "volume_shift_c" not in kwargs:
+        from .volume_translation import resolve_volume_shift
+        c = resolve_volume_shift(
+            name=identifier,
+            family=fam,
+            omega=props.get("omega", 0.0),
+            T_c=props["T_c"],
+            p_c=props["p_c"],
+            molar_mass=props.get("M", 0.0) or 0.0,
+            mode=volume_shift,
+        )
+        if c is not None:
+            kwargs["volume_shift_c"] = c
+
     # RK and VDW don't take acentric_factor
     if fam in ("rk", "vdw"):
         return factory(T_c=props["T_c"], p_c=props["p_c"], **kwargs)
