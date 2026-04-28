@@ -33,13 +33,15 @@ on every stage, and converges in ~5-10 Newton iterations.
 """
 from __future__ import annotations
 
-import warnings
+import sys, warnings
+sys.path.insert(0, '.')
 warnings.simplefilter("ignore", RuntimeWarning)
 
 import numpy as np
 
 from stateprop.tbp import discretize_TBP
 from stateprop.distillation import distillation_column, FeedSpec, SideStripper
+from examples._harness import validate, validate_bool, summary
 
 
 # =====================================================================
@@ -239,11 +241,18 @@ def characterize(x, F_label, F):
     return avg_NBP, avg_MW, avg_SG
 
 print(f"\nProduct streams (by ascending NBP):")
-characterize(result.x_D, "Light naphtha (overhead)", result.D)
-for i, ss_res in enumerate(result.side_strippers):
-    characterize(ss_res["x_bottoms"], f"Side product {i+1}",
-                  ss_res["bottoms_rate"])
-characterize(result.x_B, "Atmospheric residue (bottoms)", result.B)
+prod_LN = characterize(result.x_D, "Light naphtha (overhead)", result.D)
+prod_SS1 = characterize(result.side_strippers[0]["x_bottoms"],
+                              "Side product 1 (heavy naphtha)",
+                              result.side_strippers[0]["bottoms_rate"])
+prod_SS2 = characterize(result.side_strippers[1]["x_bottoms"],
+                              "Side product 2 (kerosene)",
+                              result.side_strippers[1]["bottoms_rate"])
+prod_SS3 = characterize(result.side_strippers[2]["x_bottoms"],
+                              "Side product 3 (light gas oil)",
+                              result.side_strippers[2]["bottoms_rate"])
+prod_AR = characterize(result.x_B, "Atmospheric residue (bottoms)",
+                              result.B)
 
 # Mass balance check
 F_in = F_total
@@ -315,3 +324,104 @@ infrastructure — the column, side stripper, and pseudo-component
 machinery built up across v0.9.88-95 was deliberately designed to
 support exactly this workflow.
 """)
+
+
+# =====================================================================
+# Validation
+# =====================================================================
+#
+# Reference values: typical industrial atmospheric crude-tower cuts
+# documented in any major refinery engineering text (Watkins,
+# Petroleum Refinery Distillation, 2nd ed., 1979; Speight, Handbook
+# of Petroleum Refining, 2017).
+#
+# - Light naphtha:      30-100 °C NBP, 55-65 °API
+# - Heavy naphtha:     100-180 °C NBP, 50-60 °API
+# - Kerosene/jet:      150-250 °C NBP, 40-50 °API
+# - Light gas oil:     200-340 °C NBP, 32-42 °API
+# - Atmospheric residue: 350+ °C NBP, 18-28 °API
+
+print("\nValidation:")
+
+# 1. Solver converged
+validate_bool("Naphtali-Sandholm solver converged",
+                condition=result.converged,
+                detail=f"Newton iterations = {result.iterations}, "
+                f"||F||={result.message.split('||F||=')[-1] if '||F||=' in (result.message or '') else 'small'}")
+
+# 2. Mass balance closure
+total_out = result.D + sum(ss["bottoms_rate"]
+                                  for ss in result.side_strippers) + result.B
+validate("Overall mass balance closure",
+          reference=F_total, computed=total_out,
+          units="mol/h", tol_rel=1e-6, tol_abs=1e-6,
+          source="Conservation of mass — should close exactly")
+
+# 3. Light-naphtha cut quality
+ln_NBP_K, ln_MW, ln_SG = prod_LN
+validate_bool("Light naphtha NBP in 60-110 °C range "
+              "(typical light-naphtha cut)",
+                condition=(333 <= ln_NBP_K <= 383),
+                detail=f"NBP = {ln_NBP_K-273.15:.1f} °C",
+                source="Watkins 1979 Table 4.2 / Speight 2017")
+ln_API = 141.5 / ln_SG - 131.5
+validate_bool("Light naphtha API gravity in 55-65 ° range",
+                condition=(55 <= ln_API <= 65),
+                detail=f"API = {ln_API:.1f}°",
+                source="Industrial light-naphtha spec")
+
+# 4. Kerosene cut quality (side product 2 by index)
+kero_NBP_K, kero_MW, kero_SG = prod_SS2
+validate_bool("Kerosene NBP in 150-250 °C range",
+                condition=(423 <= kero_NBP_K <= 523),
+                detail=f"NBP = {kero_NBP_K-273.15:.1f} °C",
+                source="Industrial kerosene/jet-fuel spec")
+kero_API = 141.5 / kero_SG - 131.5
+validate_bool("Kerosene API gravity in 40-50 ° range",
+                condition=(40 <= kero_API <= 50),
+                detail=f"API = {kero_API:.1f}°",
+                source="Industrial kerosene spec")
+
+# 5. Diesel cut quality (side product 3)
+diesel_NBP_K, diesel_MW, diesel_SG = prod_SS3
+validate_bool("Diesel NBP in 200-340 °C range",
+                condition=(473 <= diesel_NBP_K <= 613),
+                detail=f"NBP = {diesel_NBP_K-273.15:.1f} °C",
+                source="Industrial diesel spec")
+diesel_API = 141.5 / diesel_SG - 131.5
+validate_bool("Diesel API gravity in 32-42 ° range",
+                condition=(32 <= diesel_API <= 42),
+                detail=f"API = {diesel_API:.1f}°",
+                source="Industrial light-gas-oil spec")
+
+# 6. Atmospheric residue is heavy (high NBP, low API)
+ar_NBP_K, ar_MW, ar_SG = prod_AR
+validate_bool("Atmospheric residue NBP > 350 °C (heavy fraction)",
+                condition=(ar_NBP_K > 623),
+                detail=f"NBP = {ar_NBP_K-273.15:.1f} °C",
+                source="Atmospheric residue is the heaviest cut")
+ar_API = 141.5 / ar_SG - 131.5
+validate_bool("Atmospheric residue API gravity in 15-30 ° range",
+                condition=(15 <= ar_API <= 30),
+                detail=f"API = {ar_API:.1f}°",
+                source="Industrial 'long resid' typical 22-28 °API")
+
+# 7. Cuts ordered by ascending NBP (sharp separation)
+nbps = [prod_LN[0], prod_SS1[0], prod_SS2[0], prod_SS3[0], prod_AR[0]]
+validate_bool("Product NBPs strictly increasing (sharp separation)",
+                condition=all(nbps[i] < nbps[i+1]
+                                  for i in range(len(nbps)-1)),
+                detail=f"NBPs (°C): "
+                f"{[f'{(n-273.15):.0f}' for n in nbps]}")
+
+# 8. Temperature span covers typical 100-380 °C range
+T_top = T_K.min()
+T_bot = T_K.max()
+validate_bool("Temperature span > 200 K (typical crude tower)",
+                condition=((T_bot - T_top) > 200),
+                detail=f"top = {T_top-273.15:.1f} °C, "
+                f"bottom = {T_bot-273.15:.1f} °C, "
+                f"span = {T_bot-T_top:.0f} K",
+                source="Industrial atmospheric tower 200-260 K span")
+
+summary()

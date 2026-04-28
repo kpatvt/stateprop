@@ -33,9 +33,7 @@ FAILURES: list = []
 # Examples that take longer than the smoke-mode budget — run them only
 # when STATEPROP_EXAMPLES_FULL=1.  These all have published validation
 # numbers; they're worth running in the full nightly test pass.
-LONG_RUNNING = {
-    "48_crude_atmospheric_tower.py",  # ~30 s, multi-stage with side strippers
-}
+LONG_RUNNING: set = set()
 
 # Examples that are documentation-only or interactive (e.g., open
 # prompts), or that have known pre-existing bugs.
