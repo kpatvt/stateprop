@@ -7,7 +7,7 @@ Generates three plots for water:
   3. p - h       dome (Mollier-style, mass-based)
   4. T - rho     dome
 
-Produces a PNG at /mnt/user-data/outputs/phase_envelope_water.png.
+Produces a PNG at examples/outputs/phase_envelope_water.png.
 
 Run:
     python examples/04_phase_envelope_pure.py
@@ -99,7 +99,7 @@ def main():
     plt.tight_layout()
 
     # Save figure
-    out_path = "/mnt/user-data/outputs/phase_envelope_water.png"
+    out_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "outputs", "phase_envelope_water.png")
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     fig.savefig(out_path, dpi=120, bbox_inches="tight")
     print(f"Phase envelope plot saved to {out_path}")

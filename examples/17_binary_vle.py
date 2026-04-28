@@ -133,7 +133,7 @@ def main():
         axes[1].grid(True, alpha=0.3)
         axes[1].set_xlim(0, 1); axes[1].set_ylim(0, 1)
 
-        out = "/mnt/user-data/outputs/binary_vle_ethanol_water.png"
+        out = os.path.join(os.path.dirname(os.path.abspath(__file__)), "outputs", "binary_vle_ethanol_water.png")
         os.makedirs(os.path.dirname(out), exist_ok=True)
         plt.tight_layout()
         plt.savefig(out, dpi=110)

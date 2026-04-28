@@ -182,7 +182,7 @@ def main():
         axes[1].grid(True, alpha=0.3, which='both')
         axes[1].set_ylim(0, 100)
 
-        out = "/mnt/user-data/outputs/real_gas_K_eq_methanol_ammonia.png"
+        out = os.path.join(os.path.dirname(os.path.abspath(__file__)), "outputs", "real_gas_K_eq_methanol_ammonia.png")
         os.makedirs(os.path.dirname(out), exist_ok=True)
         plt.tight_layout()
         plt.savefig(out, dpi=110)

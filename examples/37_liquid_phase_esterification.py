@@ -197,7 +197,7 @@ def main():
         axes[1].set_ylim(0, 100)
         axes[1].axvline(1.0, color='gray', linestyle=':', alpha=0.5)
 
-        out = "/mnt/user-data/outputs/liquid_phase_esterification.png"
+        out = os.path.join(os.path.dirname(os.path.abspath(__file__)), "outputs", "liquid_phase_esterification.png")
         os.makedirs(os.path.dirname(out), exist_ok=True)
         plt.tight_layout()
         plt.savefig(out, dpi=110)

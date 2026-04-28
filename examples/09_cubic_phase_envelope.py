@@ -83,7 +83,7 @@ def main():
         ax.set_title(f"Phase envelope: CH4/n-C4/n-C10 = {z[0]}/{z[1]}/{z[2]}")
         ax.legend(loc="upper left")
         ax.grid(True, alpha=0.3)
-        out = "/mnt/user-data/outputs/cubic_envelope_pr_vs_srk.png"
+        out = os.path.join(os.path.dirname(os.path.abspath(__file__)), "outputs", "cubic_envelope_pr_vs_srk.png")
         os.makedirs(os.path.dirname(out), exist_ok=True)
         plt.tight_layout()
         plt.savefig(out, dpi=110)

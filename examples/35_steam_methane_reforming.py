@@ -163,7 +163,7 @@ def main():
         axes[1].legend(loc='upper right', fontsize=9)
         axes[1].grid(True, alpha=0.3, which='both')
 
-        out = "/mnt/user-data/outputs/steam_reforming_equilibrium.png"
+        out = os.path.join(os.path.dirname(os.path.abspath(__file__)), "outputs", "steam_reforming_equilibrium.png")
         os.makedirs(os.path.dirname(out), exist_ok=True)
         plt.tight_layout()
         plt.savefig(out, dpi=110)

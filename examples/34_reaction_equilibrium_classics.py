@@ -148,7 +148,7 @@ def main():
         ax.set_title('Equilibrium constants for industrial reactions')
         ax.legend(loc='upper right')
         ax.grid(True, alpha=0.3, which='both')
-        out = "/mnt/user-data/outputs/reaction_K_eq_vs_T.png"
+        out = os.path.join(os.path.dirname(os.path.abspath(__file__)), "outputs", "reaction_K_eq_vs_T.png")
         os.makedirs(os.path.dirname(out), exist_ok=True)
         plt.tight_layout()
         plt.savefig(out, dpi=110)
