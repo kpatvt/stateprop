@@ -16,6 +16,7 @@ The synthetic reaction here illustrates the solver's behavior on a
 clean LLE substrate.
 """
 
+import os
 import numpy as np
 import warnings
 warnings.simplefilter("ignore", RuntimeWarning)
@@ -153,7 +154,7 @@ def main():
     axes[2].grid(alpha=0.3)
 
     plt.tight_layout()
-    out = "/tmp/reactive_extraction_with_energy_balance.png"
+    out = os.path.join(os.path.dirname(os.path.abspath(__file__)), "outputs", "reactive_extraction_with_energy_balance.png")
     plt.savefig(out, dpi=110)
     print(f"\nPlot written to {out}")
 

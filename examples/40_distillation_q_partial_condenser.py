@@ -17,6 +17,7 @@ Two studies on the benzene/toluene/cumene ternary:
             y_0 = K_0 * x_0 in the partial case.
 """
 from __future__ import annotations
+import os
 
 import warnings
 warnings.simplefilter("ignore", RuntimeWarning)
@@ -144,7 +145,7 @@ def main():
     axes[1, 1].grid(alpha=0.3)
 
     plt.tight_layout()
-    out = "/tmp/distillation_q_fraction_partial_condenser.png"
+    out = os.path.join(os.path.dirname(os.path.abspath(__file__)), "outputs", "distillation_q_fraction_partial_condenser.png")
     plt.savefig(out, dpi=110)
     print(f"\nPlot written to {out}")
 

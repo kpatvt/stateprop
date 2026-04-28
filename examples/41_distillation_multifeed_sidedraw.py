@@ -20,6 +20,7 @@ Studies:
      point (R = 3, D = 28, U_8 = 22).
 """
 from __future__ import annotations
+import os
 
 import warnings
 warnings.simplefilter("ignore", RuntimeWarning)
@@ -165,7 +166,7 @@ def main():
     axes[2].grid(alpha=0.3)
 
     plt.tight_layout()
-    out = "/tmp/distillation_multifeed_sidedraw.png"
+    out = os.path.join(os.path.dirname(os.path.abspath(__file__)), "outputs", "distillation_multifeed_sidedraw.png")
     plt.savefig(out, dpi=110)
     print(f"\nPlot written to {out}")
 

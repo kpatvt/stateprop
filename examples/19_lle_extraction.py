@@ -11,6 +11,7 @@ Two studies:
      n_stages = 5).
 """
 
+import os
 import numpy as np
 import warnings
 warnings.simplefilter("ignore", RuntimeWarning)
@@ -111,7 +112,7 @@ def main():
     axes[2].legend()
     axes[2].grid(alpha=0.3, which="both")
     plt.tight_layout()
-    out = "/tmp/lle_extraction_acetone_recovery.png"
+    out = os.path.join(os.path.dirname(os.path.abspath(__file__)), "outputs", "lle_extraction_acetone_recovery.png")
     plt.savefig(out, dpi=110)
     print(f"\nPlot written to {out}")
 

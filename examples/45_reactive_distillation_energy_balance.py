@@ -15,6 +15,7 @@ The column is fed slightly subcooled (335 K vs ~360 K column) so the
 energy-balance effect on V/L profiles is measurable, not just symbolic.
 """
 
+import os
 import numpy as np
 import matplotlib
 matplotlib.use("Agg")
@@ -127,7 +128,7 @@ def main():
     axes[2].legend(fontsize=8)
     axes[2].grid(alpha=0.3)
     plt.tight_layout()
-    out = "/tmp/reactive_distillation_energy_balance.png"
+    out = os.path.join(os.path.dirname(os.path.abspath(__file__)), "outputs", "reactive_distillation_energy_balance.png")
     plt.savefig(out, dpi=110)
     print(f"\nPlot written to {out}")
 

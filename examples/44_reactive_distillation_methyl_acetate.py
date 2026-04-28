@@ -35,6 +35,7 @@ study the trade-off between separation (high R, more recycle of
 reactants back to the reactive zone) and column duty.
 """
 from __future__ import annotations
+import os
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -169,8 +170,10 @@ def main():
     fig.suptitle('Reactive distillation: AcOH + EtOH = EtOAc + H2O',
                   fontsize=13)
     fig.tight_layout()
-    fig.savefig('reactive_distillation_profile.png', dpi=120)
-    print(f"\nSaved: reactive_distillation_profile.png")
+    _outdir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "outputs")
+    os.makedirs(_outdir, exist_ok=True)
+    fig.savefig(os.path.join(os.path.dirname(os.path.abspath(__file__)), "outputs", "reactive_distillation_profile.png"), dpi=120)
+    print(f"\nSaved: examples/outputs/reactive_distillation_profile.png")
 
     # ------------------------------------------------------------------
     # Conversion-vs-reflux comparison plot
@@ -190,8 +193,8 @@ def main():
     ax.grid(alpha=0.3)
     ax.set_title('RD-column conversion vs reflux ratio (10 stages, D=0.5)')
     fig2.tight_layout()
-    fig2.savefig('reactive_distillation_rd_vs_batch.png', dpi=120)
-    print(f"Saved: reactive_distillation_rd_vs_batch.png")
+    fig2.savefig(os.path.join(os.path.dirname(os.path.abspath(__file__)), "outputs", "reactive_distillation_rd_vs_batch.png"), dpi=120)
+    print(f"Saved: examples/outputs/reactive_distillation_rd_vs_batch.png")
 
     print("\n" + "=" * 64)
     print("Take-aways")

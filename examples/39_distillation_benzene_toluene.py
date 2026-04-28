@@ -8,6 +8,7 @@ binary case.  Studies:
      point.
 """
 from __future__ import annotations
+import os
 
 import warnings
 warnings.simplefilter("ignore", RuntimeWarning)
@@ -115,7 +116,7 @@ def main():
     axes[2].grid(alpha=0.3)
 
     plt.tight_layout()
-    out = "/tmp/distillation_benzene_toluene.png"
+    out = os.path.join(os.path.dirname(os.path.abspath(__file__)), "outputs", "distillation_benzene_toluene.png")
     plt.savefig(out, dpi=110)
     print(f"\nPlot written to {out}")
 
